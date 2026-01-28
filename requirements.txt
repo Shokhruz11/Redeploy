@@ -1,2 +1,4 @@
 pyTelegramBotAPI
-google-generativeai
+openai
+python-pptx
+python-docx
