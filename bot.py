@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
 import sqlite3
-from datetime import datetime
 
 import telebot
 from telebot import types
@@ -16,7 +15,7 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-# Bot username: t.me/USERNAME dagi USERNAME ( @sizisiz )
+# Bot username: t.me/USERNAME dagi USERNAME (@sizisiz)
 BOT_USERNAME = os.getenv("BOT_USERNAME", "YourBotUserNameHere")
 
 # Admin ID – o'zingning Telegram ID (butun son)
@@ -27,6 +26,13 @@ CARD_NUMBER = os.getenv("CARD_NUMBER", "4790 9200 1858 5070")
 CARD_OWNER = os.getenv("CARD_OWNER", "Qo'chqorov Shohruz")
 PRICE_PER_USE = int(os.getenv("PRICE_PER_USE", "5000"))  # so'm
 MAX_LIST_SLAYD = int(os.getenv("MAX_LIST_SLAYD", "20"))
+
+# Start menyu logotipi uchun Telegram file_id (istalgan rasmingni botga yuborib,
+# keyin getUpdates orqali file_id olib, LOGO_FILE_ID env ga yozib qo'yasan)
+LOGO_FILE_ID = os.getenv("LOGO_FILE_ID", "")
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN env o'zgaruvchisi topilmadi")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -145,7 +151,7 @@ def ensure_user(tg_user, ref_code_from_start=None):
                             bot.send_message(
                                 inviter_tg_id,
                                 "🎉 Tabriklaymiz! Siz 2 ta do'stni taklif qildingiz.\n"
-                                "Sizga 1 marta bepul foydalanish qo‘shildi!",
+                                "Sizga 1 marta bepul foydalanish qo‘shildi! 🎁",
                             )
                         except Exception:
                             pass
@@ -272,7 +278,7 @@ def get_referral_info_text(tg_id: int) -> str:
 
     link = f"https://t.me/{BOT_USERNAME}?start={code}"
     text = (
-        "📎 *Referal tizimi:*\n\n"
+        "📎 *Referal tizimi – do'st taklif qilib bonus oling!*\n\n"
         "Ushbu havolani do'stlaringizga yuboring. Har *2 ta* do'stingiz "
         "sizning havolangiz orqali botga /start bossa, sizga *1 marta bepul* "
         "foydalanish qo'shiladi.\n\n"
@@ -287,6 +293,12 @@ def ask_deepseek(prompt: str) -> str:
     """
     DeepSeek chat API orqali javob olish.
     """
+    if not DEEPSEEK_API_KEY:
+        return (
+            "❗️ AI kaliti topilmadi. Iltimos, admin bilan bog‘laning "
+            "yoki DEEPSEEK_API_KEY env o'zgaruvchisini to'g'ri kiriting."
+        )
+
     url = "https://api.deepseek.com/chat/completions"
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -299,8 +311,9 @@ def ask_deepseek(prompt: str) -> str:
                 "role": "system",
                 "content": (
                     "Sen talabalarga slayd, referat, kurs ishi, test va boshqa "
-                    "ilmiy-ishlar bo'yicha matn tayyorlab beradigan yordamchi botsan. "
-                    "O'zbek tilida, tushunarli va aniq yoz."
+                    "ilmiy ishlar bo‘yicha matn tayyorlab beradigan ta’limiy yordamchi botsan. "
+                    "Matnlar O‘zbekiston oliy va o‘rta maxsus ta’lim standartlariga mos, "
+                    "tushunarli, plagiatsiz va ilmiy-uslubda bo‘lsin."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -320,8 +333,8 @@ def ask_deepseek(prompt: str) -> str:
 def main_menu_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Slayd", "📚 Kurs ishi")
-    kb.row("👨‍🏫 Professional jamoa", "📎 Referal tizimi")
-    kb.row("💳 To‘lov", "💰 Balans", "ℹ️ Yordam")
+    kb.row("👨‍🏫 Profi jamoa", "🎁 Referal bonus")
+    kb.row("💵 To‘lov / Hisob", "💰 Balans", "❓ Yordam")
     return kb
 
 
@@ -337,19 +350,35 @@ def cmd_start(message: telebot.types.Message):
     ensure_user(message.from_user, ref_code_from_start=ref_code)
 
     welcome_text = (
-        "Assalomu alaykum! 👋\n\n"
-        "Ushbu bot orqali siz:\n"
+        "👋 *Assalomu alaykum, talaba!* \n\n"
+        "Siz *ta’lim topshiriqlari* uchun mo‘ljallangan AI yordamchi botdasiz.\n\n"
+        "Bu yerda siz:\n"
         "▫️ Slayd (PPT) matni\n"
-        "▫️ Mustaqil ish, referat\n"
-        "▫️ Kurs ishi uchun materiallar\n"
+        "▫️ Mustaqil ish va referat\n"
+        "▫️ Kurs ishi uchun ilmiy matnlar\n"
         "▫️ Test, esse va boshqa topshiriqlar\n"
-        "tayyorlashda AI yordamidan foydalanishingiz mumkin.\n\n"
+        "bo‘yicha yordam olishingiz mumkin.\n\n"
         "🆓 Yangi foydalanuvchilarga *1 marta BEPUL* foydalanish beriladi.\n"
         f"Keyingi har bir foydalanish narxi: *{PRICE_PER_USE} so'm*.\n\n"
-        "Asosiy menyudan kerakli bo‘limni tanlang 👇"
+        "Quyidagi menyudan kerakli bo‘limni tanlang 👇"
     )
 
-    bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard())
+    if LOGO_FILE_ID:
+        # Agar LOGO_FILE_ID env da bo'lsa – logotip bilan birga jo'natamiz
+        bot.send_photo(
+            message.chat.id,
+            LOGO_FILE_ID,
+            caption=welcome_text,
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            welcome_text,
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
+        )
 
 
 # ============================
@@ -373,57 +402,80 @@ def cmd_referral(message: telebot.types.Message):
 @bot.message_handler(commands=["help"])
 def cmd_help(message: telebot.types.Message):
     help_text = (
-        "ℹ️ *Yordam:*\n\n"
-        "1️⃣ Slayd – mavzu, dizayn va list soni bo‘yicha slayd matni tuzib beradi.\n"
-        "2️⃣ Kurs ishi – kurs ishi uchun reja va matn bo‘yicha yordam beradi.\n"
-        "3️⃣ Professional jamoa – kurs ishi va diplom ishi bo‘yicha "
-        "bevosita admin bilan bog‘lanish.\n"
-        "4️⃣ Referal tizimi – 2 ta do‘stni taklif qilsangiz, 1 marta bepul.\n"
-        "5️⃣ Balans – bepul va to‘langan foydalanishlar sonini ko‘rish.\n"
-        "6️⃣ To‘lov – karta raqami va to‘lov tartibi.\n\n"
-        "Qo‘shimcha savollar bo‘lsa admin bilan bog‘laning: @Shokhruz11"
+        "❓ *Yordam bo‘limi*\n\n"
+        "Botning asosiy imkoniyatlari:\n"
+        "1️⃣ *Slayd* – mavzu, dizayn va list soni bo‘yicha slaydlar uchun matn.\n"
+        "2️⃣ *Kurs ishi* – kurs ishi rejasi va bo‘limlari bo‘yicha ilmiy matn.\n"
+        "3️⃣ *Profi jamoa* – kurs ishi va diplom ishni to‘liq tayyorlatish uchun aloqa.\n"
+        "4️⃣ *Referal bonus* – do‘st taklif qilib, bepul foydalanish olish.\n"
+        "5️⃣ *Balans* – sizda nechta foydalanish imkoniyati borligini ko‘rish.\n"
+        "6️⃣ *To‘lov / Hisob* – karta ma’lumotlari va avtomatik hisob-kitob.\n\n"
+        "Savollar bo‘lsa admin bilan bog‘laning: @Shokhruz11"
     )
     bot.send_message(
         message.chat.id, help_text, parse_mode="Markdown", reply_markup=main_menu_keyboard()
     )
 
 
+# ============================
+#   /CHEK – SCREENSHOT / MATN QABUL QILISH
+# ============================
+
 @bot.message_handler(commands=["chek"])
 def cmd_chek(message: telebot.types.Message):
     """
     Foydalanuvchi to'lov chek ma'lumotini yuborishi uchun.
-    Admin uchun xabarni forward qiladi.
+    Screenshot (rasm) yoki matn yuborishi mumkin.
     """
     bot.send_message(
         message.chat.id,
-        "💳 To'lov chek ma'lumotini yozib yuboring.\n"
-        "Masalan:\n"
-        "`50 000 so'm, 8600 **** **** 1234, 29.01.2026 22:15`",
+        "🧾 *To'lov cheki*\n\n"
+        "Iltimos, quyidagilardan birini yuboring:\n"
+        "▫️ To‘lov chekini *screenshot (rasm)* ko‘rinishida\n"
+        "YOKI\n"
+        "▫️ Matn ko‘rinishida: `50 000 so'm, 8600 **** **** 1234, 29.01.2026 22:15`\n\n"
+        "Chekingiz admin tomonidan tekshirilgach, balansingizga foydalanish huquqi qo‘shiladi.",
         parse_mode="Markdown",
     )
-    bot.register_next_step_handler(message, process_chek_text)
+    bot.register_next_step_handler(message, process_chek_message)
 
 
-def process_chek_text(message: telebot.types.Message):
-    text = message.text
+def process_chek_message(message: telebot.types.Message):
     tg_id = message.from_user.id
-    username = "@" + message.from_user.username if message.from_user.username else str(
-        tg_id
+    username = (
+        "@" + message.from_user.username
+        if message.from_user.username
+        else str(tg_id)
     )
 
-    admin_msg = (
+    # Admin uchun umumiy matn
+    header = (
         "🧾 *Yangi to'lov cheki!*\n\n"
         f"Foydalanuvchi: {username}\n"
         f"Telegram ID: `{tg_id}`\n"
-        f"Xabar:\n{text}"
     )
+
     try:
         if ADMIN_ID:
-            bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown")
+            if message.content_type == "photo":
+                # Eng katta o'lchamli rasmni olamiz
+                photo = message.photo[-1]
+                caption = header + "Chek screenshot rasm ko‘rinishida yuborildi."
+                bot.send_photo(
+                    ADMIN_ID,
+                    photo.file_id,
+                    caption=caption,
+                    parse_mode="Markdown",
+                )
+            else:
+                text = message.text or "(matn bo'sh)"
+                caption = header + "Matn ko‘rinishidagi xabar:\n" + text
+                bot.send_message(ADMIN_ID, caption, parse_mode="Markdown")
+
         bot.send_message(
             message.chat.id,
-            "✅ Rahmat! Chek ma'lumotingiz admin ga yuborildi.\n"
-            "Tez orada balansingiz yangilanadi.",
+            "✅ Rahmat! Chekingiz admin ga yuborildi.\n"
+            "Tekshiruvdan so‘ng balansingiz yangilanadi.",
         )
     except Exception:
         bot.send_message(
@@ -497,43 +549,77 @@ def handle_balance_button(message: telebot.types.Message):
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 
-@bot.message_handler(func=lambda m: m.text == "📎 Referal tizimi")
+@bot.message_handler(func=lambda m: m.text == "🎁 Referal bonus")
 def handle_referral_button(message: telebot.types.Message):
     ensure_user(message.from_user)
     text = get_referral_info_text(message.from_user.id)
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 
-@bot.message_handler(func=lambda m: m.text == "ℹ️ Yordam")
+@bot.message_handler(func=lambda m: m.text == "❓ Yordam")
 def handle_help_button(message: telebot.types.Message):
     cmd_help(message)
 
 
-@bot.message_handler(func=lambda m: m.text == "💳 To‘lov")
+@bot.message_handler(func=lambda m: m.text == "💵 To‘lov / Hisob")
 def handle_payment_button(message: telebot.types.Message):
     text = (
-        "💳 *To'lov tartibi:*\n\n"
-        f"1️⃣ Kartaga to'lov qiling:\n"
+        "💵 *To'lov va hisob-kitob bo‘limi*\n\n"
+        f"1️⃣ Bot xizmatlaridan foydalanish narxi: *{PRICE_PER_USE} so'm* (1 ta topshiriq / 1 ta slayd matni).\n\n"
+        "2️⃣ To‘lovni quyidagi kartaga amalga oshiring:\n"
         f"▫️ Karta: `{CARD_NUMBER}`\n"
         f"▫️ Egasi: *{CARD_OWNER}*\n\n"
-        f"2️⃣ Har bir foydalanish narxi: *{PRICE_PER_USE} so'm* "
-        f"(20 listgacha slayd uchun).\n\n"
-        "3️⃣ To'lovni amalga oshirgandan so'ng, /chek buyrug'i orqali chek ma'lumotini yuboring.\n"
+        "3️⃣ To‘lovdan so‘ng /chek buyrug‘i orqali chek screenshotini yoki matnini yuboring.\n"
         "4️⃣ Admin balansingizga foydalanish huquqlarini qo‘shib beradi.\n\n"
-        "Savollar bo'lsa: @Shokhruz11"
+        "👇 Quyidagi tugmalar orqali nechta foydalanish uchun to‘lov qilmoqchi "
+        "ekanligingizni tanlasangiz, bot avtomatik hisoblab beradi."
     )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("1 ta foydalanish", callback_data="calc_uses_1"),
+        types.InlineKeyboardButton("2 ta", callback_data="calc_uses_2"),
+    )
+    kb.row(
+        types.InlineKeyboardButton("5 ta", callback_data="calc_uses_5"),
+        types.InlineKeyboardButton("10 ta", callback_data="calc_uses_10"),
+    )
+
+    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=kb)
 
 
-@bot.message_handler(func=lambda m: m.text == "👨‍🏫 Professional jamoa")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("calc_uses_"))
+def callback_calc_uses(call: telebot.types.CallbackQuery):
+    """
+    To'lov miqdorini avtomatik hisoblash (1 / 2 / 5 / 10 marta).
+    """
+    try:
+        uses = int(call.data.split("_")[-1])
+    except ValueError:
+        bot.answer_callback_query(call.id, "Xatolik!")
+        return
+
+    total = uses * PRICE_PER_USE
+    msg = (
+        f"📊 *Hisob-kitob:*\n\n"
+        f"▫️ Foydalanish soni: *{uses} ta*\n"
+        f"▫️ Bir martalik narx: *{PRICE_PER_USE} so'm*\n"
+        f"➡️ Jami to'lov: *{total} so'm*\n\n"
+        "To‘lovni amalga oshirgach, /chek buyrug‘i orqali chekingizni yuborishni unutmang."
+    )
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, msg, parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text == "👨‍🏫 Profi jamoa")
 def handle_prof_team(message: telebot.types.Message):
     text = (
-        "👨‍🏫 *Professional jamoa:*\n\n"
+        "👨‍🏫 *Professional jamoa bilan aloqa*\n\n"
         "Kurs ishi, malakaviy ish, diplom ishi, dissertatsiya va boshqa "
-        "katta ilmiy ishlar bo‘yicha professional yordam uchun admin bilan "
-        "bevosita bog‘laning:\n\n"
+        "katta ilmiy ishlarni *to‘liq tayyorlatish* bo‘yicha professional yordam kerak bo‘lsa:\n\n"
         "📞 Telegram: @Shokhruz11\n\n"
-        "Kurs ishi va diplom ishlar *admin bilan kelishilgan holda* bajariladi."
+        "Barcha shartlar, muddat va narxlar *faqat admin bilan kelishilgan holda* belgilanadi."
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
@@ -542,7 +628,8 @@ def handle_prof_team(message: telebot.types.Message):
 def handle_kurs_ishi(message: telebot.types.Message):
     ensure_user(message.from_user)
     bot.send_message(
-        message.chat.id, "📚 Kurs ishingiz mavzusini batafsil yozib yuboring:"
+        message.chat.id,
+        "📚 Kurs ishingiz *to‘liq mavzusi*ni va agar bo‘lsa, talablarini yozib yuboring:",
     )
     bot.register_next_step_handler(message, process_kurs_ishi_topic)
 
@@ -557,22 +644,24 @@ def process_kurs_ishi_topic(message: telebot.types.Message):
         bot.send_message(
             message.chat.id,
             "❗️ Sizda bepul yoki to‘langan foydalanishlar qolmadi.\n"
-            "Iltimos, To‘lov bo‘limi orqali balansni to‘ldiring yoki referal "
-            "tizimi orqali bepul foydalanish oling.",
+            "Iltimos, *To‘lov / Hisob* bo‘limi orqali balansni to‘ldiring "
+            "yoki *Referal bonus* bo‘limi orqali bepul foydalanish oling.",
+            parse_mode="Markdown",
         )
         return
 
     bot.send_message(
         message.chat.id,
-        "⏳ Kurs ishi bo‘yicha material tayyorlanmoqda, biroz kuting...",
+        "⏳ Kurs ishi bo‘yicha ilmiy material tayyorlanmoqda, biroz kuting...",
     )
 
     prompt = (
         "Quyidagi mavzu bo'yicha kurs ishi uchun ILMIY USLUBDA reja va asosiy qism "
-        "bo'yicha batafsil matn tuzib ber:\n\n"
+        "bo'yicha batafsil matn tuzib ber. Matn oliy ta’lim talabi darajasida bo‘lsin.\n\n"
         f"Mavzu: {topic}\n\n"
-        "Matnda: kirish, 2-3 bobli asosiy qism va xulosa bo'lsin. "
-        "O'zbek tilining ilmiy-uslubiga mos yoz."
+        "Struktura: kirish, 2–3 bobli asosiy qism va xulosa.\n"
+        "Har bir bob ichida kichik bo‘limlar, ilmiy tahlil va amaliy misollar bo‘lsin.\n"
+        "Plagiatsiz, o‘zbek tilining ilmiy-uslubiga mos yoz."
     )
     answer = ask_deepseek(prompt)
     bot.send_message(message.chat.id, answer)
@@ -589,7 +678,7 @@ def handle_slayd(message: telebot.types.Message):
     kb = types.InlineKeyboardMarkup()
     buttons = []
     for i in range(1, 7):
-        btn = types.InlineKeyboardButton(f"Dizayn {i}", callback_data=f"slayd_design_{i}")
+        btn = types.InlineKeyboardButton(f"🎨 Dizayn {i}", callback_data=f"slayd_design_{i}")
         buttons.append(btn)
 
     kb.add(buttons[0], buttons[1])
@@ -598,7 +687,12 @@ def handle_slayd(message: telebot.types.Message):
 
     bot.send_message(
         message.chat.id,
-        "🎨 6 xil slayd dizaynidan birini tanlang:",
+        "🎓 *Slayd generatori*\n\n"
+        "1️⃣ Avval dizaynni tanlang.\n"
+        f"2️⃣ Keyin slaydlar sonini kiriting (1–{MAX_LIST_SLAYD}).\n"
+        "3️⃣ So‘ng mavzuni yozing – AI siz uchun ta’limga mos slayd matnini tuzib beradi.\n\n"
+        "Quyidagi dizaynlardan birini tanlang 👇",
+        parse_mode="Markdown",
         reply_markup=kb,
     )
 
@@ -616,8 +710,9 @@ def callback_slayd_design(call: telebot.types.CallbackQuery):
     bot.answer_callback_query(call.id)
     bot.send_message(
         call.message.chat.id,
-        f"✅ Dizayn {design} tanlandi.\n"
-        f"Necha listli slayd kerak? (1–{MAX_LIST_SLAYD} oralig‘ida son kiriting):",
+        f"✅ *Dizayn {design}* tanlandi.\n"
+        f"Endi necha listli slayd kerak? (1–{MAX_LIST_SLAYD} oralig‘ida son kiriting):",
+        parse_mode="Markdown",
     )
     bot.register_next_step_handler(call.message, process_slayd_lists)
 
@@ -653,7 +748,8 @@ def process_slayd_lists(message: telebot.types.Message):
 
     bot.send_message(
         message.chat.id,
-        "✍️ Endi slayd mavzusini batafsil yozib yuboring:",
+        "✍️ Endi slayd *mavzusini* batafsil yozib yuboring:",
+        parse_mode="Markdown",
     )
     bot.register_next_step_handler(message, process_slayd_topic)
 
@@ -680,8 +776,9 @@ def process_slayd_topic(message: telebot.types.Message):
         bot.send_message(
             message.chat.id,
             "❗️ Sizda bepul yoki to‘langan foydalanishlar qolmadi.\n"
-            "Iltimos, To‘lov bo‘limi orqali balansni to‘ldiring yoki referal "
-            "tizimi orqali bepul foydalanish oling.",
+            "Iltimos, *To‘lov / Hisob* bo‘limi orqali balansni to‘ldiring "
+            "yoki *Referal bonus* bo‘limi orqali bepul foydalanish oling.",
+            parse_mode="Markdown",
         )
         return
 
@@ -695,10 +792,13 @@ def process_slayd_topic(message: telebot.types.Message):
         f"- Mavzu: {topic}\n"
         f"- Slaydlar (list) soni: {lists}\n"
         f"- Dizayn turi: {design}\n\n"
-        "Har bir slayd uchun alohida sarlavha va punktlar bo'lsin.\n"
+        "Har bir slayd uchun:\n"
+        "▫️ qisqa, aniq sarlavha,\n"
+        "▫️ 3–6 ta asosiy punkt,\n"
+        "▫️ kerak bo‘lsa, misollar va izohlar bo‘lsin.\n\n"
         "Har slaydni 'SLAYD 1', 'SLAYD 2' ko'rinishida ajratib yoz.\n"
-        "Matn o'zbek tilida, talaba uchun tushunarli va aniq bo'lsin.\n"
-        "Faqat matnni yoz, boshqa izohlar kerak emas."
+        "Matn o'zbek tilida, talaba uchun tushunarli va ilmiy-uslubga yaqin bo'lsin.\n"
+        "Faqat slayd matnini yoz, boshqa izohlar kerak emas."
     )
 
     answer = ask_deepseek(prompt)
@@ -719,7 +819,7 @@ def default_handler(message: telebot.types.Message):
     if message.text.startswith("/"):
         bot.send_message(
             message.chat.id,
-            "Bu buyruq tushunarsiz. Asosiy menyudan foydalaning.",
+            "Bu buyruq tushunarsiz. Asosiy menyudan foydalaning 👇",
             reply_markup=main_menu_keyboard(),
         )
     else:
@@ -736,5 +836,4 @@ def default_handler(message: telebot.types.Message):
 
 if __name__ == "__main__":
     print("Bot ishga tushdi...")
-    # skip_pending=True – eski xabarlarni o'qimaydi
     bot.infinity_polling(skip_pending=True)
