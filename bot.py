@@ -15,7 +15,7 @@ from telebot import types
 from openai import OpenAI
 
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.util import Pt
 from docx import Document
 
 # ============================
@@ -29,7 +29,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Talabalar_xizmatbot")
 
 # Admin ID – sening Telegram ID'ing
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5754599655"))
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "5754599655"))
+except ValueError:
+    ADMIN_ID = 0
 
 # To'lov ma'lumotlari
 CARD_NUMBER = os.getenv("CARD_NUMBER", "4790 9200 1858 5070")
@@ -48,10 +51,10 @@ if not BOT_TOKEN:
 if not OPENAI_API_KEY:
     print("⚠️ OGОHLANTIRISH: OPENAI_API_KEY o'rnatilmagan. AI funksiyalari ishlamaydi.")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
-# OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+# OpenAI client (kalit bo'lmasa None bo'ladi)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================
 #   MA'LUMOTLAR BAZASI
@@ -67,29 +70,21 @@ CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER UNIQUE,
     username TEXT,
     full_name TEXT,
-    free_uses INTEGER DEFAULT 1,          -- yangi foydalanuvchi uchun 1 marta bepul
-    paid_uses INTEGER DEFAULT 0,          -- to'lov orqali olingan foydalanishlar
-    referral_uses INTEGER DEFAULT 0,      -- referal orqali olingan bepul foydalanishlar
-    referrals_count INTEGER DEFAULT 0,    -- nechta odamni taklif qilgan
+    free_uses INTEGER DEFAULT 1,
+    paid_uses INTEGER DEFAULT 0,
+    referral_uses INTEGER DEFAULT 0,
+    referrals_count INTEGER DEFAULT 0,
     referral_code TEXT,
-    referred_by INTEGER                   -- kim orqali kelgani (telegram_id)
+    referred_by INTEGER,
+    language TEXT
 )
 """
 )
 conn.commit()
 
-# language ustunini mavjud bo'lmasa qo‘shib olamiz
-try:
-    cursor.execute("ALTER TABLE users ADD COLUMN language TEXT")
-    conn.commit()
-except sqlite3.OperationalError:
-    # allaqachon mavjud bo‘lsa xato beradi – e'tibor bermaymiz
-    pass
-
 # Foydalanuvchi holati (slayd dizayn, chek, h.k.)
-# misol: { tg_id: {"mode": "slayd", "design": "1", "lists": 10} }
+# misol: { tg_id: {"mode": "slayd_step_topic", "design": "1", "lists": 10} }
 user_states = {}
-
 
 # ============================
 #   LANGUAGE FUNKSIYALARI
@@ -98,12 +93,9 @@ user_states = {}
 def get_user_language(tg_id: int) -> str:
     cursor.execute("SELECT language FROM users WHERE telegram_id = ?", (tg_id,))
     row = cursor.fetchone()
-    if row is None:
+    if row is None or not row[0]:
         return "uz"
-    lang = row[0]
-    if not lang:
-        return "uz"
-    return lang
+    return row[0]
 
 
 def set_user_language(tg_id: int, lang: str):
@@ -151,7 +143,6 @@ def ensure_user(tg_user, ref_code_from_start=None):
 
     user = get_user_by_tg_id(tg_id)
     if user is None:
-        # Yangi foydalanuvchi
         referral_code = generate_referral_code(tg_id)
         cursor.execute(
             """
@@ -166,12 +157,10 @@ def ensure_user(tg_user, ref_code_from_start=None):
         if ref_code_from_start:
             inviter = get_user_by_ref_code(ref_code_from_start)
             if inviter:
-                inviter_tg_id = inviter[1]  # 1-ustun: telegram_id
+                inviter_tg_id = inviter[1]  # telegram_id
                 if inviter_tg_id != tg_id:  # o'zini o'zi taklif qilmasin
                     cursor.execute(
-                        """
-                        UPDATE users SET referred_by = ? WHERE telegram_id = ?
-                    """,
+                        "UPDATE users SET referred_by = ? WHERE telegram_id = ?",
                         (inviter_tg_id, tg_id),
                     )
                     cursor.execute(
@@ -182,14 +171,17 @@ def ensure_user(tg_user, ref_code_from_start=None):
                     """,
                         (inviter_tg_id,),
                     )
+                    conn.commit()
+
                     cursor.execute(
                         """
-                        SELECT referrals_count, referral_uses
+                        SELECT referrals_count
                         FROM users WHERE telegram_id = ?
                     """,
                         (inviter_tg_id,),
                     )
-                    r_count, r_uses = cursor.fetchone()
+                    r_count = cursor.fetchone()[0]
+
                     # Har 2 ta referal uchun 1 marta bepul foydalanish
                     if r_count % 2 == 0:
                         cursor.execute(
@@ -210,13 +202,10 @@ def ensure_user(tg_user, ref_code_from_start=None):
                         except Exception:
                             pass
 
-        conn.commit()
         user = get_user_by_tg_id(tg_id)
     else:
         cursor.execute(
-            """
-            UPDATE users SET username = ?, full_name = ? WHERE telegram_id = ?
-        """,
+            "UPDATE users SET username = ?, full_name = ? WHERE telegram_id = ?",
             (username, full_name.strip(), tg_id),
         )
         conn.commit()
@@ -353,7 +342,7 @@ def ask_gpt(prompt: str, lang: str) -> str:
     OpenAI GPT-4.1-mini orqali javob olish.
     Javob foydalanuvchi tanlagan tilda bo'ladi: uz / ru / en
     """
-    if not OPENAI_API_KEY:
+    if client is None or not OPENAI_API_KEY:
         return (
             "❗️ AI kaliti (OPENAI_API_KEY) topilmadi. Iltimos, admin bilan bog‘laning."
         )
@@ -374,20 +363,14 @@ def ask_gpt(prompt: str, lang: str) -> str:
     )
 
     try:
-        resp = client.responses.create(
+        resp = client.chat.completions.create(
             model="gpt-4.1-mini",
-            input=[
-                {
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": system_text}],
-                },
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
-                },
+            messages=[
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": prompt},
             ],
         )
-        return resp.output_text
+        return resp.choices[0].message.content
     except Exception as e:
         print("OpenAI xato:", e)
         return "❗️ AI xizmatida kutilmagan xatolik yuz berdi. Birozdan so‘ng qayta urinib ko‘ring."
@@ -421,21 +404,17 @@ def parse_slides_from_text(text: str):
             continue
 
         upper = stripped.upper()
-        if upper.startswith("SLIDE") or upper.startswith("SLAYD") or upper.startswith("SLAYD"):
-            # yangi slayd
+        if upper.startswith("SLIDE") or upper.startswith("SLAYD"):
             push_current()
             current = {"title": "", "bullets": []}
-            # "SLIDE 1: Title" bo'lsa – qismdan sarlavha olib ko‘ramiz
             parts = stripped.split(":", 1)
             if len(parts) == 2:
                 current["title"] = parts[1]
             else:
-                # SLIDE 1 – sarlavha keyingi qatorlarda bo'lishi mumkin
                 current["title"] = ""
-        elif stripped.startswith("-") or stripped.startswith("•") or stripped.startswith("*"):
+        elif stripped.startswith(("-", "•", "*")):
             current["bullets"].append(stripped.lstrip("-•* ").strip())
         else:
-            # Agar title bo'sh bo'lsa – birinchi oddiy qatordan sarlavha, qolganlari bullet
             if not current["title"]:
                 current["title"] = stripped
             else:
@@ -444,7 +423,6 @@ def parse_slides_from_text(text: str):
     push_current()
 
     if not slides:
-        # pars bo'lmasa – bitta slayd
         slides = [
             {
                 "title": "Slayd",
@@ -457,15 +435,12 @@ def parse_slides_from_text(text: str):
 def apply_design_to_slide(slide, design: str):
     """
     Dizayn raqamiga qarab slaydga sodda stil berish.
-    Juda murakkab bo'lmasin – fon, shrift o'lchami va hk.
     """
-    # title va body placeholderlarini olamiz
     title_shape = slide.shapes.title
     body = None
     if len(slide.placeholders) > 1:
         body = slide.placeholders[1].text_frame
 
-    # turli dizaynlar uchun turli font o'lchamlari va bold
     if title_shape:
         title_shape.text_frame.paragraphs[0].font.bold = True
         if design == "1":
@@ -481,7 +456,6 @@ def apply_design_to_slide(slide, design: str):
         for p in body.paragraphs:
             p.font.size = Pt(22)
 
-    # fon rangini dizaynga qarab o'zgartirish (eng sodda usul: gradient yo'q, faqat to'liq rang)
     from pptx.dml.color import RGBColor
 
     bg = slide.background
@@ -489,17 +463,17 @@ def apply_design_to_slide(slide, design: str):
     fill.solid()
 
     if design == "1":
-        fill.fore_color.rgb = RGBColor(255, 255, 255)  # oq
+        fill.fore_color.rgb = RGBColor(255, 255, 255)
     elif design == "2":
-        fill.fore_color.rgb = RGBColor(230, 242, 255)  # och-ko'k
+        fill.fore_color.rgb = RGBColor(230, 242, 255)
     elif design == "3":
-        fill.fore_color.rgb = RGBColor(242, 242, 242)  # kulrang
+        fill.fore_color.rgb = RGBColor(242, 242, 242)
     elif design == "4":
-        fill.fore_color.rgb = RGBColor(255, 242, 204)  # sariq
+        fill.fore_color.rgb = RGBColor(255, 242, 204)
     elif design == "5":
-        fill.fore_color.rgb = RGBColor(226, 239, 218)  # yashil
+        fill.fore_color.rgb = RGBColor(226, 239, 218)
     else:
-        fill.fore_color.rgb = RGBColor(237, 237, 255)  # binafsha-oq
+        fill.fore_color.rgb = RGBColor(237, 237, 255)
 
 
 def create_pptx_from_text(text: str, design: str, filename: str):
@@ -547,7 +521,7 @@ def create_docx_from_text(text: str, filename: str, title: str = None):
 #   MENYU
 # ============================
 
-def main_menu_keyboard(tg_id: int = None):
+def main_menu_keyboard(_tg_id: int = None):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Slayd", "📚 Kurs ishi")
     kb.row("📄 Mustaqil ish / Referat", "👨‍🏫 Profi jamoa")
@@ -589,14 +563,12 @@ def cmd_start(message: telebot.types.Message):
             message.chat.id,
             LOGO_FILE_ID,
             caption=welcome_text,
-            parse_mode="Markdown",
             reply_markup=main_menu_keyboard(message.from_user.id),
         )
     else:
         bot.send_message(
             message.chat.id,
             welcome_text,
-            parse_mode="Markdown",
             reply_markup=main_menu_keyboard(message.from_user.id),
         )
 
@@ -622,12 +594,12 @@ def cmd_language(message: telebot.types.Message):
         "🌐 *Tilni tanlang / Choose language:*\n\n"
         f"Joriy til: *{language_label(current_lang)}*"
     )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=kb)
+    bot.send_message(message.chat.id, text, reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("set_lang_"))
 def callback_set_language(call: telebot.types.CallbackQuery):
-    lang_code = call.data.split("_")[-1]  # uz / ru / en
+    lang_code = call.data.split("_")[-1]
     if lang_code not in ("uz", "ru", "en"):
         bot.answer_callback_query(call.id, "Xatolik!")
         return
@@ -640,7 +612,6 @@ def callback_set_language(call: telebot.types.CallbackQuery):
         txt,
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        parse_mode="Markdown",
     )
     bot.send_message(
         call.message.chat.id,
@@ -658,7 +629,7 @@ def callback_set_language(call: telebot.types.CallbackQuery):
 def handle_balance(message: telebot.types.Message):
     ensure_user(message.from_user)
     text = get_balance_text(message.from_user.id)
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    bot.send_message(message.chat.id, text)
 
 
 @bot.message_handler(commands=["referral"])
@@ -666,7 +637,7 @@ def handle_balance(message: telebot.types.Message):
 def handle_referral(message: telebot.types.Message):
     ensure_user(message.from_user)
     text = get_referral_info_text(message.from_user.id)
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    bot.send_message(message.chat.id, text)
 
 
 @bot.message_handler(commands=["help"])
@@ -689,7 +660,6 @@ def cmd_help(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         help_text,
-        parse_mode="Markdown",
         reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
@@ -723,7 +693,7 @@ def handle_payment_button(message: telebot.types.Message):
         types.InlineKeyboardButton("10 ta", callback_data="calc_uses_10"),
     )
 
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=kb)
+    bot.send_message(message.chat.id, text, reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("calc_uses_"))
@@ -744,18 +714,18 @@ def callback_calc_uses(call: telebot.types.CallbackQuery):
     )
 
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, msg, parse_mode="Markdown")
+    bot.send_message(call.message.chat.id, msg)
 
 
 # ============================
-#   /CHEK – TO'LOV CHEKI (ADMIN TASDIQLI)
+#   /CHEK – TO'LOV CHEKI
 # ============================
 
 @bot.message_handler(commands=["chek"])
 def cmd_chek(message: telebot.types.Message):
     """
     Foydalanuvchi /chek yozganda holatni 'chek'ga qo'yamiz.
-    Keyingi yuborilgan foto yoki matn admin'ga jo'natiladi.
+    Keyingi yuborilgan foto / document / matn admin'ga jo'natiladi.
     """
     ensure_user(message.from_user)
     tg_id = message.from_user.id
@@ -765,22 +735,22 @@ def cmd_chek(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         "🧾 *To'lov cheki*\n\n"
-        "Iltimos, to‘lov chekini *screenshot (rasm)* ko‘rinishida yuboring.\n"
+        "Iltimos, to‘lov chekini *screenshot (rasm)* yoki *fayl (document)* "
+        "ko‘rinishida yuboring.\n"
         "Agar xohlasangiz, qo‘shimcha ravishda matn ham yozishingiz mumkin.\n\n"
         "Chekingiz admin (@Shokhruz11) tomonidan ko‘rib chiqiladi. "
         "Tasdiqlangach, balansingizga foydalanish huquqi qo‘shiladi.",
-        parse_mode="Markdown",
     )
 
 
 @bot.message_handler(
     func=lambda m: user_states.get(m.from_user.id, {}).get("mode") == "chek",
-    content_types=["photo", "text"],
+    content_types=["photo", "document", "text"],
 )
 def handle_chek_flow(message: telebot.types.Message):
     """
     Bu handler faqat 'chek' holatidagi foydalanuvchilar uchun ishlaydi.
-    Rasm yoki matnni admin'ga yuboradi, admin tasdiqlash tugmasi orqali balansni to'ldiradi.
+    Rasm / fayl yoki matnni admin'ga yuboradi, admin tasdiqlash tugmasi orqali balansni to'ldiradi.
     """
     tg_id = message.from_user.id
     username = (
@@ -788,6 +758,8 @@ def handle_chek_flow(message: telebot.types.Message):
         if message.from_user.username
         else str(tg_id)
     )
+
+    print(f"[CHEK] Keldi: user={tg_id}, turi={message.content_type}")
 
     header = (
         "🧾 *Yangi to'lov cheki!*\n\n"
@@ -799,33 +771,46 @@ def handle_chek_flow(message: telebot.types.Message):
 
     kb = types.InlineKeyboardMarkup()
     kb.row(
-        types.InlineKeyboardButton("✅ 1 ta foydalanish", callback_data=f"approve_{tg_id}_1"),
-        types.InlineKeyboardButton("✅ 3 ta", callback_data=f"approve_{tg_id}_3"),
+        types.InlineKeyboardButton(
+            "✅ 1 ta foydalanish", callback_data=f"approve_{tg_id}_1"
+        ),
+        types.InlineKeyboardButton(
+            "✅ 3 ta", callback_data=f"approve_{tg_id}_3"
+        ),
     )
     kb.row(
-        types.InlineKeyboardButton("✅ 5 ta", callback_data=f"approve_{tg_id}_5"),
+        types.InlineKeyboardButton(
+            "✅ 5 ta", callback_data=f"approve_{tg_id}_5"
+        ),
     )
 
     try:
-        if ADMIN_ID:
-            if message.content_type == "photo":
-                photo = message.photo[-1]
-                bot.send_photo(
-                    ADMIN_ID,
-                    photo.file_id,
-                    caption=header,
-                    parse_mode="Markdown",
-                    reply_markup=kb,
-                )
-            elif message.content_type == "text":
-                text = message.text or "(matn bo'sh)"
-                caption = header + "\n\nMatn:\n" + text
-                bot.send_message(
-                    ADMIN_ID,
-                    caption,
-                    parse_mode="Markdown",
-                    reply_markup=kb,
-                )
+        if not ADMIN_ID:
+            raise RuntimeError("ADMIN_ID sozlanmagan")
+
+        if message.content_type == "photo":
+            photo = message.photo[-1]
+            bot.send_photo(
+                ADMIN_ID,
+                photo.file_id,
+                caption=header,
+                reply_markup=kb,
+            )
+        elif message.content_type == "document":
+            bot.send_document(
+                ADMIN_ID,
+                message.document.file_id,
+                caption=header,
+                reply_markup=kb,
+            )
+        elif message.content_type == "text":
+            text = message.text or "(matn bo'sh)"
+            caption = header + "\n\nMatn:\n" + text
+            bot.send_message(
+                ADMIN_ID,
+                caption,
+                reply_markup=kb,
+            )
 
         bot.send_message(
             message.chat.id,
@@ -837,10 +822,9 @@ def handle_chek_flow(message: telebot.types.Message):
         bot.send_message(
             message.chat.id,
             "❗️ Chek ma'lumotini admin ga yuborishda xatolik yuz berdi. "
-            "Keyinroq qayta urinib ko‘ring.",
+            "Keyinroq qayta urinib ko‘ring yoki admin bilan bevosita yozishib chiqing: @Shokhruz11",
         )
 
-    # holatni tozalaymiz
     user_states.pop(tg_id, None)
 
 
@@ -877,20 +861,22 @@ def callback_approve_payment(call: telebot.types.CallbackQuery):
     # Admin xabarini "tasdiqlandi" deb yangilaymiz
     try:
         if call.message.content_type == "text":
-            new_text = call.message.text + f"\n\n✅ Admin tasdiqladi: {uses} ta foydalanish qo'shildi."
+            new_text = call.message.text + (
+                f"\n\n✅ Admin tasdiqladi: {uses} ta foydalanish qo'shildi."
+            )
             bot.edit_message_text(
                 new_text,
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                parse_mode="Markdown",
             )
         else:
-            new_caption = (call.message.caption or "") + f"\n\n✅ Admin tasdiqladi: {uses} ta foydalanish qo'shildi."
+            new_caption = (call.message.caption or "") + (
+                f"\n\n✅ Admin tasdiqladi: {uses} ta foydalanish qo'shildi."
+            )
             bot.edit_message_caption(
                 new_caption,
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                parse_mode="Markdown",
             )
     except Exception as e:
         print("Approve edit xatosi:", e)
@@ -901,14 +887,13 @@ def callback_approve_payment(call: telebot.types.CallbackQuery):
             target_id,
             f"💳 To‘lovingiz admin tomonidan tasdiqlandi.\n"
             f"Balansingizga *{uses} ta* foydalanish qo‘shildi.",
-            parse_mode="Markdown",
         )
     except Exception as e:
         print("User notify xatosi:", e)
 
 
 # ============================
-#   ADMIN BUYRUQLARI (/add_uses zaxira)
+#   ADMIN BUYRUQLARI
 # ============================
 
 @bot.message_handler(commands=["add_uses"])
@@ -968,7 +953,7 @@ def handle_prof_team(message: telebot.types.Message):
         "📞 Telegram: @Shokhruz11\n\n"
         "Barcha shartlar, muddat va narxlar *faqat admin bilan kelishilgan holda* belgilanadi."
     )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    bot.send_message(message.chat.id, text)
 
 
 @bot.message_handler(func=lambda m: m.text == "📚 Kurs ishi")
@@ -980,7 +965,6 @@ def handle_kurs_ishi(message: telebot.types.Message):
         "ko‘rsatmalarini yozib yuboring.\n\n"
         "Agar kurs ishini to‘liq tayyorlatmoqchi bo‘lsangiz, "
         "👨‍🏫 *Profi jamoa* bo‘limi orqali @Shokhruz11 bilan bog‘lanishingiz mumkin.",
-        parse_mode="Markdown",
     )
     bot.register_next_step_handler(message, process_kurs_ishi_topic)
 
@@ -990,20 +974,19 @@ def process_kurs_ishi_topic(message: telebot.types.Message):
     tg_id = message.from_user.id
     ensure_user(message.from_user)
 
-    ok, src = consume_credit(tg_id)
+    ok, _ = consume_credit(tg_id)
     if not ok:
         bot.send_message(
             message.chat.id,
             "❗️ Sizda bepul yoki to‘langan foydalanishlar qolmadi.\n"
             "Iltimos, *To‘lov / Hisob* bo‘limi orqali balansni to‘ldiring "
             "yoki *Referal bonus* bo‘limi orqali bepul foydalanish oling.",
-            parse_mode="Markdown",
         )
         return
 
     bot.send_message(
         message.chat.id,
-        "⏳ Kurs ishi bo‘yicha ilmiy material tayyorlanmoqda, birozdan keyin natija chiqadi...",
+        "⏳ Kurs ishi bo‘yicha ilmiy material tayyorlanmoqda...",
     )
 
     lang = get_user_language(tg_id)
@@ -1018,7 +1001,7 @@ def process_kurs_ishi_topic(message: telebot.types.Message):
         "- Do not add any extra explanations, just the course paper text."
     )
     answer = ask_gpt(prompt, lang)
-    bot.send_message(message.chat.id, answer)
+    bot.send_message(message.chat.id, answer[:4000])
 
 
 @bot.message_handler(func=lambda m: m.text == "📄 Mustaqil ish / Referat")
@@ -1030,7 +1013,6 @@ def handle_mustaqil(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         f"📄 Mustaqil ish / referat uchun taxminiy *betlar sonini* kiriting (1–{MAX_LIST_SLAYD}):",
-        parse_mode="Markdown",
     )
 
 
@@ -1061,7 +1043,6 @@ def process_mustaqil_pages(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         "Endi mustaqil ish / referat *mavzusini batafsil* yozib yuboring:",
-        parse_mode="Markdown",
     )
 
 
@@ -1076,21 +1057,20 @@ def process_mustaqil_topic(message: telebot.types.Message):
 
     ensure_user(message.from_user)
 
-    ok, src = consume_credit(tg_id)
+    ok, _ = consume_credit(tg_id)
     if not ok:
         bot.send_message(
             message.chat.id,
             "❗️ Sizda bepul yoki to‘langan foydalanishlar qolmadi.\n"
             "Iltimos, *To‘lov / Hisob* bo‘limi orqali balansni to‘ldiring "
             "yoki *Referal bonus* bo‘limi orqali bepul foydalanish oling.",
-            parse_mode="Markdown",
         )
         user_states.pop(tg_id, None)
         return
 
     bot.send_message(
         message.chat.id,
-        "⏳ Mustaqil ish / referat tayyorlanmoqda, birozdan keyin natija chiqadi...",
+        "⏳ Mustaqil ish / referat tayyorlanmoqda...",
     )
 
     lang = get_user_language(tg_id)
@@ -1109,10 +1089,8 @@ def process_mustaqil_topic(message: telebot.types.Message):
 
     text = ask_gpt(prompt, lang)
 
-    # matnni chatga ham yuboramiz
-    bot.send_message(message.chat.id, text[:4000])  # juda uzun bo'lsa ham, bir qismi
+    bot.send_message(message.chat.id, text[:4000])
 
-    # DOCX fayl yaratamiz
     filename = f"mustaqil_{tg_id}.docx"
     try:
         create_docx_from_text(text, filename, title=topic)
@@ -1137,7 +1115,7 @@ def process_mustaqil_topic(message: telebot.types.Message):
 
 
 # ============================
-#   SLAYD (PPTX) 6 DIZAYN BILAN
+#   SLAYD (PPTX)
 # ============================
 
 @bot.message_handler(func=lambda m: m.text == "📝 Slayd")
@@ -1160,11 +1138,9 @@ def handle_slayd(message: telebot.types.Message):
         f"1️⃣ Avval dizaynni tanlang.\n"
         f"2️⃣ Keyin slaydlar sonini kiriting (1–{MAX_LIST_SLAYD}).\n"
         "3️⃣ So‘ng mavzuni yozing – AI siz uchun ta’limga mos slayd matnini tuzib beradi.\n\n"
-        "Yangi foydalanuvchi uchun *1 marta bepul*, keyingi har bir slayd (20 listgacha) "
-        f"narxi: *{PRICE_PER_USE} so'm*.\n\n"
+        "Yangi foydalanuvchi uchun *1 marta bepul*, keyingi har bir xizmat "
+        f"(20 listgacha) narxi: *{PRICE_PER_USE} so'm*.\n\n"
         "Quyidagi dizaynlardan birini tanlang 👇",
-        parse_mode="Markdown",
-        reply_markup=kb,
     )
 
 
@@ -1183,7 +1159,6 @@ def callback_slayd_design(call: telebot.types.CallbackQuery):
         call.message.chat.id,
         f"✅ *Dizayn {design}* tanlandi.\n"
         f"Endi necha listli slayd kerak? (1–{MAX_LIST_SLAYD} oralig‘ida son kiriting):",
-        parse_mode="Markdown",
     )
 
 
@@ -1217,7 +1192,6 @@ def process_slayd_lists(message: telebot.types.Message):
     bot.send_message(
         message.chat.id,
         "✍️ Endi slayd *mavzusini* batafsil yozib yuboring:",
-        parse_mode="Markdown",
     )
 
 
@@ -1241,21 +1215,20 @@ def process_slayd_topic(message: telebot.types.Message):
 
     ensure_user(message.from_user)
 
-    ok, src = consume_credit(tg_id)
+    ok, _ = consume_credit(tg_id)
     if not ok:
         bot.send_message(
             message.chat.id,
             "❗️ Sizda bepul yoki to‘langan foydalanishlar qolmadi.\n"
             "Iltimos, *To‘lov / Hisob* bo‘limi orqali balansni to‘ldiring "
             "yoki *Referal bonus* bo‘limi orqali bepul foydalanish oling.",
-            parse_mode="Markdown",
         )
         user_states.pop(tg_id, None)
         return
 
     bot.send_message(
         message.chat.id,
-        "⏳ Slayd uchun matn va PPTX fayl tayyorlanmoqda, birozdan keyin natija chiqadi...",
+        "⏳ Slayd uchun matn va PPTX fayl tayyorlanmoqda...",
     )
 
     lang = get_user_language(tg_id)
@@ -1275,7 +1248,6 @@ def process_slayd_topic(message: telebot.types.Message):
 
     text = ask_gpt(prompt, lang)
 
-    # matnni chatga ham yuboramiz
     bot.send_message(message.chat.id, text[:4000])
 
     filename = f"slayd_{tg_id}.pptx"
