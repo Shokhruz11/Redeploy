@@ -15,10 +15,10 @@ from docx import Document
 
 BOT_TOKEN = os.getenv("8552375519:AAGH-yowxaHPeVn8wyjOYCGvv-KsYF0NkgE")  
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_ID = os.getenv("ADMIN_ID")
-CARD_NUMBER = os.getenv("CARD_NUMBER")
-CARD_OWNER = os.getenv("CARD_OWNER")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+ADMIN_ID = os.getenv("5754599655")
+CARD_NUMBER = os.getenv("4790920018585070")
+CARD_OWNER = os.getenv("Qo'chqorov Shohruz")
+ADMIN_USERNAME = os.getenv("Shokhruz11")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN env o'zgaruvchisi topilmadi")
@@ -229,3 +229,4 @@ def create_referat(msg):
 
 print("Bot ishga tushdi!")
 bot.polling(none_stop=True)
+
