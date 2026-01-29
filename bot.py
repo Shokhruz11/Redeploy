@@ -13,12 +13,12 @@ from docx import Document
 #    ENV SOZLAMALAR
 # ============================
 
-BOT_TOKEN = os.getenv("8552375519:AAGH-yowxaHPeVn8wyjOYCGvv-KsYF0NkgE")  
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_ID = os.getenv("5754599655")
-CARD_NUMBER = os.getenv("4790920018585070")
-CARD_OWNER = os.getenv("Qo'chqorov Shohruz")
-ADMIN_USERNAME = os.getenv("Shokhruz11")
+ADMIN_ID = os.getenv("ADMIN_ID")
+CARD_NUMBER = os.getenv("CARD_NUMBER")
+CARD_OWNER = os.getenv("CARD_OWNER")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN env o'zgaruvchisi topilmadi")
@@ -124,19 +124,16 @@ def generate_text_ai(prompt):
 @bot.message_handler(func=lambda m: True)
 def menu_handler(msg):
 
-    # ---------------- Slayd ----------------
     if msg.text == "🖼 Slayd":
         bot.send_message(msg.chat.id, "Slayd mavzusini kiriting:")
         bot.register_next_step_handler(msg, create_slide)
         return
 
-    # ---------------- Referat ----------------
     if msg.text == "📄 Referat":
         bot.send_message(msg.chat.id, "Referat mavzusini kiriting:")
         bot.register_next_step_handler(msg, create_referat)
         return
 
-    # ---------------- Kurs ishi / Admin link ----------------
     if msg.text == "📚 Kurs ishi":
         bot.send_message(msg.chat.id, f"Kurs ishi buyurtma uchun admin: {ADMIN_USERNAME}")
         return
@@ -146,12 +143,9 @@ def menu_handler(msg):
         return
 
     if msg.text == "ℹ Yordam":
-        bot.send_message(msg.chat.id,
-                         "Yordam uchun admin bilan bog‘laning:\n"
-                         f"{ADMIN_USERNAME}")
+        bot.send_message(msg.chat.id, f"Yordam uchun admin: {ADMIN_USERNAME}")
         return
 
-    # ---------------- To‘lov ----------------
     if msg.text == "💳 To‘lov":
         bot.send_message(msg.chat.id,
                          f"💳 To‘lov uchun karta:\n"
@@ -159,7 +153,6 @@ def menu_handler(msg):
                          f"{CARD_OWNER}")
         return
 
-    # ---------------- Profil ----------------
     if msg.text == "👤 Profil":
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -173,9 +166,7 @@ def menu_handler(msg):
                          f"Balans: <b>{bal} so‘m</b>")
         return
 
-    else:
-        bot.send_message(msg.chat.id, "❗ Iltimos, menyudan tanlang.")
-        return
+    bot.send_message(msg.chat.id, "❗ Iltimos, menyudan tanlang.")
 
 
 # ============================
@@ -190,9 +181,9 @@ def create_slide(msg):
 
     file = f"slayd_{msg.chat.id}.pptx"
     prs = Presentation()
+
     slide = prs.slides.add_slide(prs.slide_layouts[1])
-    title = slide.shapes.title
-    title.text = topic
+    slide.shapes.title.text = topic
 
     slide = prs.slides.add_slide(prs.slide_layouts[1])
     slide.shapes.title.text = "Mazmuni"
