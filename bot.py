@@ -6,7 +6,7 @@ SUPER TALABA BOT
 Funksiyalar:
 - Slayd (PPTX) generatsiyasi (6 xil dizayn)
 - Mustaqil ish / Referat (DOCX)
-- Kurs ishi (DOCX) – hozir referat logikasi bilan
+- Kurs ishi (DOCX)
 - Har bir foydalanuvchiga MAX_FREE_LIMIT marta bepul (env orqali)
 - Keyingi buyurtmalar 20 betgacha/pptgacha pullik
 - To'lov cheki rasm sifatida, admin tasdiqlaydi
@@ -23,7 +23,7 @@ from datetime import datetime
 
 import telebot
 from telebot import types
-import openai
+from openai import OpenAI
 
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -64,10 +64,8 @@ MAX_PAGES_PER_ORDER = 20
 DB_NAME = "bot_db.sqlite3"
 FILES_DIR = "generated_files"
 
-# # OpenAI klient
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+# OpenAI klient – API kalitini envdan o'zi oladi
+client = OpenAI()   # <--- E'TIBOR: bu yerda api_key parametrini bermaymiz!
 
 # TeleBot (parse_mode bermaymiz, oddiy matn)
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -81,22 +79,22 @@ user_context = {}  # chat_id -> dict
 #      YORDAMCHI FUNKSIYALAR
 # ============================
 
-def ask_gpt(prompt: str, max_tokens: int = 2048) -> str:
-    """GPT-4o-mini bilan matn generatsiyasi."""
-    try:
-        completion = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Sen talabalarga ilmiy-uslubda yordam beradigan yordamchi bo'lasan."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=max_tokens,
+def init_db():
+    """SQLite bazasini yaratish."""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+
+    # Foydalanuvchilar
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE,
+            username TEXT,
+            full_name TEXT,
+            free_used INTEGER DEFAULT 0,
+            created_at TEXT
         )
-        # eski API uslubi: message["content"]
-        return completion.choices[0].message["content"]
-    except Exception as e:
-        print("OpenAI xatosi:", e)
-        return f"ERROR: {e}"
+    """)
 
     # Buyurtmalar
     c.execute("""
@@ -139,7 +137,11 @@ def clean_text(text: str) -> str:
     """HTML/markdown belgilardan tozalash."""
     if not text:
         return ""
-    return text.replace("<", "").replace(">", "").replace("&", "")
+    return (
+        text.replace("<", "")
+            .replace(">", "")
+            .replace("&", "")
+    )
 
 
 def get_or_create_user(message):
@@ -265,20 +267,36 @@ def update_payment_status(payment_id, status):
 # ============================
 
 def ask_gpt(prompt: str, max_tokens: int = 2048) -> str:
-    """GPT-4o-mini bilan matn generatsiyasi."""
+    """
+    GPT-4o-mini bilan matn generatsiyasi.
+    API kaliti yoki balans bo'lmasa – xato matnini qaytaradi, bot qulamaydi.
+    """
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Sen talabalarga ilmiy-uslubda yordam beradigan yordamchi bo'lasan."},
+                {
+                    "role": "system",
+                    "content": "Sen talabalarga ilmiy-uslubda yordam beradigan yordamchi bo'lasan."
+                },
                 {"role": "user", "content": prompt}
             ],
             max_tokens=max_tokens,
         )
         return completion.choices[0].message.content
+
     except Exception as e:
-        print("OpenAI xatosi:", e)
-        return f"ERROR: {e}"
+        # Bu yerda xatoni logga chop etamiz, lekin foydalanuvchiga yumshoq xabar beramiz
+        err = str(e)
+        print("OpenAI xatosi:", err)
+
+        if "insufficient_quota" in err or "You exceeded your current quota" in err:
+            return "ERROR: OpenAI balans tugagan yoki kvota chegarasidan oshib ketgan."
+
+        if "Incorrect API key provided" in err or "No API key provided" in err:
+            return "ERROR: OpenAI API kaliti noto'g'ri yoki o'rnatilmagan."
+
+        return "ERROR: AI xizmatida kutilmagan xatolik yuz berdi."
 
 
 # ============================
@@ -397,7 +415,7 @@ def generate_order_file(order_id: int) -> bool:
         )
         answer = ask_gpt(prompt, max_tokens=2048)
         if answer.startswith("ERROR:"):
-            bot.send_message(chat_id, "AI xizmatida xato: " + answer[6:])
+            bot.send_message(chat_id, answer[6:])
             return False
 
         filename = create_pptx_from_text(topic, answer, design_index=(pages % 6) + 1)
@@ -411,11 +429,12 @@ def generate_order_file(order_id: int) -> bool:
         work_name = "Referat" if work_type == "referat" else "Kurs ishi"
         prompt = (
             f"Mavzu: {topic}\n"
-            f"Taxminan {pages} betlik {work_name} matnini yoz. Kirish, asosiy qism va xulosani alohida bo'limlarda ber."
+            f"Taxminan {pages} betlik {work_name} matnini yoz. "
+            "Kirish, asosiy qism va xulosani alohida bo'limlarda ber."
         )
         answer = ask_gpt(prompt, max_tokens=4096)
         if answer.startswith("ERROR:"):
-            bot.send_message(chat_id, "AI xizmatida xato: " + answer[6:])
+            bot.send_message(chat_id, answer[6:])
             return False
 
         filename = create_docx_from_text(topic, answer, work_name)
@@ -804,4 +823,3 @@ if __name__ == "__main__":
     init_db()
     ensure_files_dir()
     bot.infinity_polling(skip_pending=True)
-
