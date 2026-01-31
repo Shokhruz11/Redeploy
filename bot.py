@@ -1,961 +1,609 @@
 # -*- coding: utf-8 -*-
-"""
-SUPER TALABA PRO BOT (Gemini)
-
-Funksiyalar:
-- AI bilan suhbat (Gemini)
-- Slayd (PPTX): 📝 Slayd
-- Mustaqil ish / referat (DOCX): 📄 Mustaqil ish / Referat
-- Kurs ishi (DOCX): 📚 Kurs ishi
-- Insho (DOCX): ✍️ Insho
-- Tezis (DOCX): 📌 Tezislar
-- Maqola (DOCX): 📰 Maqola
-- To'lov + chek tizimi (skrinshot → admin → tasdiq → fayl)
-- Referal tizimi (referal link, bonus buyurtmalar)
-- Profi jamoa bo'limi (admin bilan aloqaga yo'naltirish)
-"""
-
 import os
 import sqlite3
 from datetime import datetime
-import random
-import string
 
 import telebot
 from telebot import types
 
-import google.generativeai as genai
-
+from google import genai
 from pptx import Presentation
 from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
-from pptx.dml.color import RGBColor
-
 from docx import Document
 
 # ============================
-#       ENV SOZLAMALAR
+#        SOZLAMALAR
 # ============================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "")
-try:
-    ADMIN_TELEGRAM_ID = int(ADMIN_TELEGRAM_ID) if ADMIN_TELEGRAM_ID else 0
-except Exception:
-    ADMIN_TELEGRAM_ID = 0
-
+ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))  # raqam
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@admin")
 
 CARD_NUMBER = os.getenv("CARD_NUMBER", "0000 0000 0000 0000")
 CARD_OWNER = os.getenv("CARD_OWNER", "Karta egasi")
 
-try:
-    MAX_FREE_LIMIT = int(os.getenv("MAX_FREE_LIMIT", "1"))
-except Exception:
-    MAX_FREE_LIMIT = 1
+# Tariflar
+FIRST_FREE = 1              # 1 ta topshiriq bepul
+TASK_PRICE = 5000           # har bir keyingi topshiriq
+REF_BONUS = 1000            # referal bonusi
 
-try:
-    REF_BONUS_PER_PAID = int(os.getenv("REF_BONUS_PER_PAID", "1"))
-except Exception:
-    REF_BONUS_PER_PAID = 1
+GEMINI_MODEL = "gemini-1.5-flash"
 
-PRICE_PER_ORDER = 5000       # so'm, 20 betgacha
-MAX_PAGES_PER_ORDER = 20
-
-DB_NAME = "super_talaba.sqlite3"
-FILES_DIR = "generated_files"
+# ============================
+#        TEKSHIRUVLAR
+# ============================
 
 if not BOT_TOKEN:
-    print("❌ BOT_TOKEN topilmadi!")
+    print("❌ BOT_TOKEN topilmadi. Railway Service Variables ga qo'shishni unutmang.")
 if not GEMINI_API_KEY:
-    print("❌ GEMINI_API_KEY topilmadi!")
+    print("❌ GEMINI_API_KEY topilmadi. AI ishlamaydi.")
 
-bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
+# Telegram bot
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# Gemini sozlash
+# Gemini klienti
+gemini_client = None
 if GEMINI_API_KEY:
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-        print("✅ Gemini tayyor.")
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        print("✅ Gemini tayyor (google.genai).")
     except Exception as e:
-        print("❌ Gemini xatosi:", e)
-        gemini_model = None
-else:
-    gemini_model = None
-
-# xotiradagi state
-user_state = {}   # chat_id -> state string
-user_data = {}    # chat_id -> dict
-
+        print("❌ Gemini ishga tushmadi:", e)
 
 # ============================
-#    BAZA VA FUNKSIYALAR
+#           DATABASE
 # ============================
 
-def ensure_files_dir():
-    if not os.path.exists(FILES_DIR):
-        os.makedirs(FILES_DIR)
+DB_PATH = "bot.db"
+
+
+def db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER UNIQUE,
-        username TEXT,
-        full_name TEXT,
-        free_used INTEGER DEFAULT 0,
-        bonus_orders INTEGER DEFAULT 0,
-        ref_code TEXT UNIQUE,
-        invited_by INTEGER,
-        created_at TEXT
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id      INTEGER PRIMARY KEY,
+            username     TEXT,
+            first_name   TEXT,
+            balance      INTEGER DEFAULT 0,
+            free_used    INTEGER DEFAULT 0,
+            referrals    INTEGER DEFAULT 0,
+            created_at   TEXT
+        );
+        """
     )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        work_type TEXT,
-        topic TEXT,
-        pages INTEGER,
-        price INTEGER,
-        status TEXT,
-        file_path TEXT,
-        created_at TEXT
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payments (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER,
+            amount      INTEGER,
+            status      TEXT,
+            created_at  TEXT
+        );
+        """
     )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_id INTEGER,
-        user_id INTEGER,
-        amount INTEGER,
-        status TEXT,
-        screenshot_file_id TEXT,
-        created_at TEXT
-    )
-    """)
-
     conn.commit()
     conn.close()
 
 
-def generate_ref_code(length: int = 6) -> str:
-    chars = string.ascii_uppercase + string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
+init_db()
+print("✅ DB tayyor.")
 
 
-def get_or_create_user(message, ref_payload: str | None = None):
-    """
-    Foydalanuvchini bazaga yozadi.
-    Agar start'da referal kod kelsa, invited_by ni belgilaydi.
-    """
-    tg_id = message.from_user.id
-    username = message.from_user.username or ""
-    full_name = (message.from_user.first_name or "") + " " + (message.from_user.last_name or "")
-
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT id, free_used, bonus_orders, ref_code, invited_by FROM users WHERE telegram_id = ?", (tg_id,))
-    row = c.fetchone()
-
-    if row:
-        user_id, free_used, bonus_orders, ref_code, invited_by = row
-        conn.close()
-        return user_id
-    else:
-        # yangi foydalanuvchi
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # referal kodi yaratamiz
-        ref_code = generate_ref_code()
-        invited_by_id = None
-
-        # agar start'dan ref_XXXX kelsa, taklif qilgan odamni topamiz
-        if ref_payload and ref_payload.startswith("ref_"):
-            code = ref_payload[4:].strip().upper()
-            c.execute("SELECT id FROM users WHERE ref_code = ?", (code,))
-            ref_row = c.fetchone()
-            if ref_row:
-                invited_by_id = ref_row[0]
-
-        c.execute("""
-            INSERT INTO users (telegram_id, username, full_name, free_used, bonus_orders, ref_code, invited_by, created_at)
-            VALUES (?, ?, ?, 0, 0, ?, ?, ?)
-        """, (tg_id, username, full_name, ref_code, invited_by_id, now))
+def get_user(user):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id = ?", (user.id,))
+    row = cur.fetchone()
+    if not row:
+        cur.execute(
+            """
+            INSERT INTO users(user_id, username, first_name, created_at)
+            VALUES(?,?,?,?)
+            """,
+            (user.id, user.username or "", user.first_name or "", datetime.utcnow().isoformat()),
+        )
         conn.commit()
-        user_id = c.lastrowid
-        conn.close()
-        return user_id
-
-
-def get_user_by_id(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, telegram_id, username, full_name, free_used, bonus_orders, ref_code, invited_by
-        FROM users WHERE id = ?
-    """, (user_id,))
-    row = c.fetchone()
+        cur.execute("SELECT * FROM users WHERE user_id = ?", (user.id,))
+        row = cur.fetchone()
     conn.close()
     return row
 
 
-def get_user_by_telegram_id(tg_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, telegram_id, username, full_name, free_used, bonus_orders, ref_code, invited_by
-        FROM users WHERE telegram_id = ?
-    """, (tg_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-
-def update_user_free_used(user_id: int, delta: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET free_used = free_used + ? WHERE id = ?", (delta, user_id))
+def update_user_balance(user_id, delta):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (delta, user_id))
     conn.commit()
     conn.close()
 
 
-def update_user_bonus_orders(user_id: int, delta: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET bonus_orders = MAX(bonus_orders + ?, 0) WHERE id = ?", (delta, user_id))
+def mark_free_used(user_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET free_used = 1 WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
 
 
-def get_user_balance_info(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT free_used, bonus_orders, ref_code FROM users WHERE id = ?", (user_id,))
-    row = c.fetchone()
-
-    c.execute("SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'done'", (user_id,))
-    done_count = c.fetchone()[0]
-    conn.close()
-
-    if row:
-        free_used, bonus_orders, ref_code = row
-        return int(free_used), int(bonus_orders), ref_code, done_count
-    else:
-        return 0, 0, None, 0
-
-
-def create_order(user_id: int, work_type: str, topic: str, pages: int, price: int, status: str):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("""
-        INSERT INTO orders (user_id, work_type, topic, pages, price, status, file_path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, work_type, topic, pages, price, status, "", now))
-    conn.commit()
-    order_id = c.lastrowid
-    conn.close()
-    return order_id
-
-
-def get_order(order_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, user_id, work_type, topic, pages, price, status, file_path
-        FROM orders WHERE id = ?
-    """, (order_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-
-def update_order_status(order_id: int, status: str, file_path: str | None = None):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    if file_path is not None:
-        c.execute("UPDATE orders SET status = ?, file_path = ? WHERE id = ?", (status, file_path, order_id))
-    else:
-        c.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
-    conn.commit()
-    conn.close()
-
-
-def create_payment(order_id: int, user_id: int, amount: int, screenshot_file_id: str):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("""
-        INSERT INTO payments (order_id, user_id, amount, status, screenshot_file_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (order_id, user_id, amount, "pending", screenshot_file_id, now))
-    conn.commit()
-    payment_id = c.lastrowid
-    conn.close()
-    return payment_id
-
-
-def get_payment(payment_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, order_id, user_id, amount, status, screenshot_file_id
-        FROM payments WHERE id = ?
-    """, (payment_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-
-def update_payment_status(payment_id: int, status: str):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE payments SET status = ? WHERE id = ?", (status, payment_id))
+def add_referral(ref_user_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET referrals = referrals + 1, balance = balance + ? WHERE user_id = ?",
+        (REF_BONUS, ref_user_id),
+    )
     conn.commit()
     conn.close()
 
 
 # ============================
-#        GEMINI FUNKSIYA
+#            AI
 # ============================
 
 def ask_ai(prompt: str) -> str:
-    if not gemini_model:
+    if not gemini_client:
         return "ERROR: AI sozlanmagan. Admin GEMINI_API_KEY ni tekshirishi kerak."
+
     try:
-        resp = gemini_model.generate_content(prompt)
-        text = getattr(resp, "text", "") or ""
-        text = text.strip()
+        resp = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
+        text = (getattr(resp, "text", "") or "").strip()
         if not text:
             return "ERROR: AI javob qaytara olmadi."
         return text
     except Exception as e:
         print("Gemini xatosi:", repr(e))
-        return "ERROR: AI xizmatida xatolik yuz berdi."
+        return "ERROR: AI xizmatida kutilmagan xatolik yuz berdi."
+
+
+def build_prompt(kind: str, topic: str, pages: int) -> str:
+    return f"""
+Senga talabalar uchun yozma ish tayyorlash topshirig'i berilgan.
+
+Ish turi: {kind}
+Mavzu: {topic}
+Taxminiy hajm: {pages} bet.
+
+Talablar:
+- Kirish, asosiy qism, xulosa bo'lsin.
+- Ilmiy, adabiy va tushunarli uslubda yoz.
+- Reja va sarlavhalarni ham kiriting.
+- Matn o'zbek tilida bo'lsin.
+- Keraksiz izohlar, "mana matn" kabi gaplar bo'lmasin.
+"""
 
 
 # ============================
-#       FAYL YARATISH
+#      FAYL GENERATSIYASI
 # ============================
 
-def create_pptx_from_text(topic: str, ai_text: str) -> str:
-    ensure_files_dir()
+def create_pptx(title: str, text: str, filename: str) -> str:
     prs = Presentation()
+    # Birinchi slayd – sarlavha
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    slide.shapes.title.text = title
+    subtitle = slide.placeholders[1]
+    subtitle.text = "AI tomonidan tayyorlangan taqdimot"
 
-    colors = [
-        RGBColor(0, 102, 204),
-        RGBColor(34, 139, 34),
-        RGBColor(128, 0, 128),
-        RGBColor(220, 20, 60),
-        RGBColor(255, 140, 0),
-        RGBColor(47, 79, 79),
-    ]
-
-    blocks = [b.strip() for b in ai_text.split("\n\n") if b.strip()]
-    if not blocks:
-        blocks = [ai_text]
-
-    for i, block in enumerate(blocks):
-        slide_layout = prs.slide_layouts[5]
-        slide = prs.slides.add_slide(slide_layout)
-
-        bg = slide.shapes.add_shape(
-            autoshape_type_id=1,
-            left=Inches(0),
-            top=Inches(0),
-            width=Inches(13.3),
-            height=Inches(7.5),
-        )
-        fill = bg.fill
-        fill.solid()
-        fill.fore_color.rgb = colors[i % len(colors)]
-        bg.line.width = 0
-
-        tx = slide.shapes.add_textbox(
-            left=Inches(0.7),
-            top=Inches(1),
-            width=Inches(12),
-            height=Inches(5.5),
-        )
-        tf = tx.text_frame
-        tf.word_wrap = True
-
-        lines = block.split("\n")
-        title = lines[0][:80]
-        body = "\n".join(lines[1:]) if len(lines) > 1 else ""
-
-        p_title = tf.paragraphs[0]
-        p_title.text = title
-        p_title.font.size = Pt(36)
-        p_title.font.bold = True
-        p_title.font.color.rgb = RGBColor(255, 255, 255)
-        p_title.alignment = PP_ALIGN.CENTER
-
-        if body:
-            p_body = tf.add_paragraph()
-            p_body.text = body
-            p_body.font.size = Pt(24)
-            p_body.font.color.rgb = RGBColor(255, 255, 255)
-            p_body.alignment = PP_ALIGN.LEFT
-
-    filename = os.path.join(FILES_DIR, f"slayd_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx")
+    # Qolgan slaydlar – matnni bo'lib joylashtiramiz
+    slides_chunks = text.split("\n\n")
+    for chunk in slides_chunks:
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        shapes = slide.shapes
+        body_shape = shapes.placeholders[1]
+        tf = body_shape.text_frame
+        tf.clear()
+        for i, line in enumerate(chunk.split("\n")):
+            if not line.strip():
+                continue
+            if i == 0:
+                tf.text = line.strip()
+            else:
+                p = tf.add_paragraph()
+                p.text = line.strip()
+                p.level = 1
     prs.save(filename)
     return filename
 
 
-def create_docx_from_text(title: str, ai_text: str, work_type: str) -> str:
-    ensure_files_dir()
+def create_docx(title: str, text: str, filename: str) -> str:
     doc = Document()
-    doc.add_heading(f"{work_type}: {title}", level=1)
-
-    blocks = [b.strip() for b in ai_text.split("\n\n") if b.strip()]
-    if not blocks:
-        blocks = [ai_text]
-
-    for block in blocks:
-        doc.add_paragraph(block)
-
-    filename = os.path.join(FILES_DIR, f"doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx")
+    doc.add_heading(title, level=1)
+    for par in text.split("\n\n"):
+        doc.add_paragraph(par.strip())
     doc.save(filename)
     return filename
 
 
-def generate_order_file(order_id: int) -> bool:
-    order = get_order(order_id)
-    if not order:
-        return False
-
-    o_id, user_id, work_type, topic, pages, price, status, file_path = order
-
-    user = get_user_by_id(user_id)
-    if not user:
-        return False
-    _, tg_id, _, _, _, _, _, _ = user
-    chat_id = tg_id
-
-    if work_type == "slayd":
-        prompt = (
-            f"Mavzu: {topic}\n"
-            f"{pages} ta slayd uchun matn tuzing. Har bir slayd uchun sarlavha va 3–6 ta punkt yozing.\n"
-            "Har bir slayd matnini ikki bo'sh qator bilan ajrating."
-        )
-        answer = ask_ai(prompt)
-        if answer.startswith("ERROR:"):
-            bot.send_message(chat_id, answer[6:])
-            return False
-
-        filename = create_pptx_from_text(topic, answer)
-        update_order_status(order_id, "done", filename)
-        with open(filename, "rb") as f:
-            bot.send_document(chat_id, f, caption=f"Slayd tayyor!\nMavzu: {topic}")
-        return True
-
-    else:
-        if work_type == "referat":
-            work_name = "Mustaqil ish / Referat"
-        elif work_type == "kurs":
-            work_name = "Kurs ishi"
-        elif work_type == "insho":
-            work_name = "Insho"
-        elif work_type == "tezis":
-            work_name = "Tezislar"
-        else:
-            work_name = "Maqola"
-
-        prompt = (
-            f"Mavzu: {topic}\n"
-            f"Taxminan {pages} betlik {work_name} matnini yozing.\n"
-            "Kirish, asosiy qism va xulosani alohida bo'limlarda, ilmiy va tushunarli uslubda bayon qiling."
-        )
-        if work_type == "tezis":
-            prompt += "\nMatnni asosiy tezislar ko'rinishida, punktlar bilan yozing."
-
-        answer = ask_ai(prompt)
-        if answer.startswith("ERROR:"):
-            bot.send_message(chat_id, answer[6:])
-            return False
-
-        filename = create_docx_from_text(topic, answer, work_name)
-        update_order_status(order_id, "done", filename)
-        with open(filename, "rb") as f:
-            bot.send_document(chat_id, f, caption=f"{work_name} tayyor!\nMavzu: {topic}")
-        return True
-
-
 # ============================
-#           MENYU
+#            MENYU
 # ============================
 
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("📝 Slayd", "📄 Mustaqil ish / Referat")
-    kb.row("📚 Kurs ishi", "✍️ Insho", "📌 Tezislar")
+    kb.row("📚 Kurs ishi", "✍️ Insho", "🧩 Tezislar")
     kb.row("📰 Maqola", "🤖 AI bilan suhbat")
-    kb.row("🧑‍🏫 Profi jamoa", "🎁 Referal bonus")
-    kb.row("💰 Balans", "💵 To'lov / Chek", "❓ Yordam")
+    kb.row("🎁 Referal bonus", "💰 Balans", "💳 To'lov / Hisob")
+    kb.row("👨‍🏫 Profi jamoa", "❓ Yordam")
+    return kb
+
+
+def pay_menu():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("✅ 5 000 so'm", callback_data="pay_5000"),
+        types.InlineKeyboardButton("✅ 10 000 so'm", callback_data="pay_10000"),
+    )
+    kb.add(types.InlineKeyboardButton("📸 Chekni yubordim", callback_data="pay_help"))
     return kb
 
 
 # ============================
-#         KOMANDALAR
+#         /start + REF
 # ============================
 
 @bot.message_handler(commands=["start"])
-def cmd_start(message):
-    # referal payload: /start ref_XXXX
-    ref_payload = None
-    if " " in message.text:
-        parts = message.text.split(" ", 1)
-        ref_payload = parts[1].strip()
-
-    user_id = get_or_create_user(message, ref_payload)
-    free_used, bonus_orders, ref_code, done_count = get_user_balance_info(user_id)
-
+def cmd_start(message: types.Message):
+    user = get_user(message.from_user)
     text = (
-        "Assalomu alaykum! 😊\n\n"
-        "Siz *SUPER TALABA PRO BOT*dasiz.\n\n"
-        "Bu bot orqali:\n"
+        "Assalomu alaykum, hurmatli talaba! 👋\n\n"
+        "Siz *Super Talaba PRO* botidasiz.\n\n"
+        "Bu yerda siz quyidagi xizmatlardan foydalanishingiz mumkin:\n"
         "• 📝 Slayd (PPTX)\n"
-        "• 📄 Mustaqil ish / referat\n"
+        "• 📄 Mustaqil ish / Referat (DOCX)\n"
         "• 📚 Kurs ishi\n"
-        "• ✍️ Insho\n"
-        "• 📌 Tezis\n"
-        "• 📰 Maqola\n"
-        "ni avtomatik tayyorlab olishingiz mumkin.\n\n"
-        f"🎁 Bepul buyurtma limiti: {MAX_FREE_LIMIT} ta\n"
-        f"✅ Siz foydalanilgan: {free_used} ta\n"
-        f"⭐ Referal bonus buyurtmalar: {bonus_orders} ta\n"
-        f"📂 Yakunlangan buyurtmalar: {done_count} ta\n\n"
-        "Menyudan kerakli bo'limni tanlang."
+        "• ✍️ Insho, 🧩 Tezislar, 📰 Maqola\n"
+        "• 🤖 AI bilan suhbat\n"
+        "• 🎁 Referal bonus, 💳 To'lov va chek tizimi\n\n"
+        f"Bir dona topshiriq sizga *bepul* beriladi. Keyingi topshiriqlar narxi: *{TASK_PRICE} so'm*.\n\n"
+        "Kerakli bo'limni menyudan tanlang."
     )
+
+    # Referal: /start ref_123
+    if message.text and " " in message.text:
+        try:
+            _, arg = message.text.split(" ", 1)
+            if arg.startswith("ref_"):
+                ref_id = int(arg.replace("ref_", ""))
+                if ref_id != message.from_user.id:
+                    add_referral(ref_id)
+                    bot.send_message(
+                        ref_id,
+                        f"🎉 Do'stingiz referal havolangiz orqali kirdi. Sizga +{REF_BONUS} so'm bonus!",
+                    )
+        except Exception:
+            pass
+
     bot.send_message(message.chat.id, text, reply_markup=main_menu(), parse_mode="Markdown")
 
 
-@bot.message_handler(commands=["help"])
-def cmd_help(message):
-    text = (
-        "❓ *Yordam bo'limi*\n\n"
-        "1) Xizmat turi bo'yicha tugmani bosing (Slayd, Referat, Kurs ishi...)\n"
-        "2) Mavzuni kiriting.\n"
-        "3) Bet / slayd sonini kiriting.\n"
-        "4) Agar sizda bepul limiti bo'lsa, buyurtma avtomatik bajariladi.\n"
-        "5) Aks holda karta raqamiga to'lov qilib, chekni skrinshotini yuborasiz.\n"
-        "6) Admin tasdiqlaydi → fayl tayyor bo'ladi.\n\n"
-        "Referal bo'limida do'stlaringizni taklif qilib, qo'shimcha bepul buyurtmalar olishingiz mumkin."
+# ============================
+#      BALANS / REFERAL
+# ============================
+
+@bot.message_handler(commands=["balance"])
+def cmd_balance(message: types.Message):
+    user = get_user(message.from_user)
+    ref_link = f"https://t.me/{bot.get_me().username}?start=ref_{message.from_user.id}"
+    txt = (
+        f"💰 Balansingiz: *{user['balance']} so'm*\n"
+        f"🧾 Bepul ishlatilgan: {user['free_used']}/{FIRST_FREE}\n"
+        f"👥 Referallar soni: {user['referrals']}\n\n"
+        f"Referal havolangiz:\n`{ref_link}`"
     )
-    bot.send_message(message.chat.id, text, reply_markup=main_menu(), parse_mode="Markdown")
-
-
-@bot.message_handler(commands=["ai"])
-def cmd_ai(message):
-    user_state[message.chat.id] = "ai_chat"
-    bot.send_message(message.chat.id, "Savolingizni yoki mavzuni yozing. AI javob qaytaradi.")
+    bot.send_message(message.chat.id, txt, parse_mode="Markdown")
 
 
 # ============================
-#      MENYU BOSIMLARI
+#        TO'LOV / CHEK
 # ============================
 
-@bot.message_handler(func=lambda m: m.text == "🤖 AI bilan suhbat")
-def handle_ai_button(message):
-    cmd_ai(message)
-
-
-@bot.message_handler(func=lambda m: m.text == "❓ Yordam")
-def handle_help_btn(message):
-    cmd_help(message)
-
-
-@bot.message_handler(func=lambda m: m.text == "🧑‍🏫 Profi jamoa")
-def handle_pro_team(message):
+@bot.message_handler(commands=["pay"])
+def cmd_pay(message: types.Message):
     text = (
-        "🧑‍🏫 *Profi jamoa*\n\n"
-        "Murakkab kurs ishlari, diplom ishlari, magistratura uchun ishlarda "
-        f"bevosita admin bilan bog'laning: {ADMIN_USERNAME}\n\n"
-        "Bot orqali esa oddiy referat, kurs ishi, slayd va boshqa topshiriqlarni avtomatik bajartirishingiz mumkin."
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-@bot.message_handler(func=lambda m: m.text == "🎁 Referal bonus")
-def handle_referral(message):
-    row = get_user_by_telegram_id(message.from_user.id)
-    if not row:
-        user_id = get_or_create_user(message)
-        free_used, bonus_orders, ref_code, done_count = get_user_balance_info(user_id)
-    else:
-        user_id, tg_id, username, full_name, free_used, bonus_orders, ref_code, invited_by = row
-        _, _, ref_code, done_count = get_user_balance_info(user_id)
-
-    if not ref_code:
-        ref_code = generate_ref_code()
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("UPDATE users SET ref_code = ? WHERE id = ?", (ref_code, user_id))
-        conn.commit()
-        conn.close()
-
-    try:
-        me = bot.get_me()
-        bot_username = me.username
-    except Exception:
-        bot_username = "SuperTalabaBot"
-
-    ref_link = f"https://t.me/{bot_username}?start=ref_{ref_code}"
-
-    text = (
-        "🎁 *Referal tizimi*\n\n"
-        f"Sizning referal kodingiz: `{ref_code}`\n"
-        f"Referal link: {ref_link}\n\n"
-        f"Har bir do'stingiz ushbu link orqali kirib, pullik buyurtma qilsa,\n"
-        f"sizga {REF_BONUS_PER_PAID} ta qo'shimcha bepul buyurtma qo'shiladi.\n\n"
-        f"Joriy bonus buyurtmalar: {bonus_orders} ta."
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-@bot.message_handler(func=lambda m: m.text == "💰 Balans")
-def handle_balance(message):
-    row = get_user_by_telegram_id(message.from_user.id)
-    if not row:
-        user_id = get_or_create_user(message)
-    else:
-        user_id = row[0]
-
-    free_used, bonus_orders, ref_code, done_count = get_user_balance_info(user_id)
-    text = (
-        "💰 *Balans ma'lumotlari*\n\n"
-        f"- Bepul limit: {MAX_FREE_LIMIT} ta\n"
-        f"- Foydalanilgan bepul buyurtma: {free_used} ta\n"
-        f"- Referal bonus buyurtmalar: {bonus_orders} ta\n"
-        f"- Yakunlangan buyurtmalar: {done_count} ta\n\n"
-        f"Har bir pullik buyurtma narxi: {PRICE_PER_ORDER} so'm (20 bet/slaydgacha)."
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-@bot.message_handler(func=lambda m: m.text == "💵 To'lov / Chek")
-def handle_payment_info(message):
-    text = (
-        "💵 *To'lov ma'lumotlari*\n\n"
-        f"Karta raqami: `{CARD_NUMBER}`\n"
+        "💳 *To'lov / Hisobni to'ldirish*\n\n"
+        f"Karta: `{CARD_NUMBER}`\n"
         f"Karta egasi: *{CARD_OWNER}*\n\n"
-        "To'lovni amalga oshirgach, shu botga chek skrinshotini rasm ko'rinishida yuboring.\n"
-        "Agar sizda faol buyurtma bo'lmasa, avval menyudan biror xizmat turini tanlab buyurtma yarating."
+        "To'lov qilingandan so'ng chek (screenshot) ni shu botga yuboring.\n"
+        "Admin chekni tekshirib, balansingizni to'ldirib beradi."
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
-
-# --------- Xizmat tugmalari ---------
-
-SERVICE_BUTTONS = {
-    "📝 Slayd": "slayd",
-    "📄 Mustaqil ish / Referat": "referat",
-    "📚 Kurs ishi": "kurs",
-    "✍️ Insho": "insho",
-    "📌 Tezislar": "tezis",
-    "📰 Maqola": "maqola",
-}
-
-
-@bot.message_handler(func=lambda m: m.text in SERVICE_BUTTONS.keys())
-def handle_service_select(message):
-    chat_id = message.chat.id
-    work_type = SERVICE_BUTTONS[message.text]
-
-    user_state[chat_id] = "enter_topic"
-    user_data[chat_id] = {"work_type": work_type}
-
-    if work_type == "slayd":
-        prompt = "Slayd mavzusini yozing:"
-    elif work_type == "referat":
-        prompt = "Mustaqil ish / referat mavzusini yozing:"
-    elif work_type == "kurs":
-        prompt = "Kurs ishi mavzusini yozing:"
-    elif work_type == "insho":
-        prompt = "Insho mavzusini yozing:"
-    elif work_type == "tezis":
-        prompt = "Tezislar mavzusini yozing:"
-    else:
-        prompt = "Maqola mavzusini yozing:"
-
-    bot.send_message(chat_id, prompt, reply_markup=types.ReplyKeyboardRemove())
-
-
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "enter_topic")
-def handle_enter_topic(message):
-    chat_id = message.chat.id
-    data = user_data.get(chat_id, {})
-    work_type = data.get("work_type", "referat")
-
-    topic = message.text.strip()
-    data["topic"] = topic
-    user_data[chat_id] = data
-
-    if work_type == "slayd":
-        text = "Nechta slayd kerak? (1–20):"
-    else:
-        text = "Taxminan necha bet kerak? (1–20):"
-
-    user_state[chat_id] = "enter_pages"
-    bot.send_message(chat_id, text)
-
-
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "enter_pages")
-def handle_enter_pages(message):
-    chat_id = message.chat.id
-    data = user_data.get(chat_id, {})
-    work_type = data.get("work_type", "referat")
-    topic = data.get("topic", "")
-
-    try:
-        pages = int(message.text.strip())
-        if not 1 <= pages <= MAX_PAGES_PER_ORDER:
-            raise ValueError()
-    except ValueError:
-        bot.send_message(chat_id, f"Iltimos, 1 dan {MAX_PAGES_PER_ORDER} gacha bo'lgan son kiriting.")
-        return
-
-    data["pages"] = pages
-    user_data[chat_id] = data
-
-    # foydalanuvchini olamiz
-    user_row = get_user_by_telegram_id(message.from_user.id)
-    if not user_row:
-        user_id = get_or_create_user(message)
-        free_used, bonus_orders, ref_code, done_count = get_user_balance_info(user_id)
-    else:
-        user_id = user_row[0]
-        free_used, bonus_orders, ref_code, done_count = get_user_balance_info(user_id)
-
-    # bepul yoki pullik?
-    if free_used < MAX_FREE_LIMIT:
-        # asosiy bepul limit
-        bot.send_message(chat_id, "Sizda bepul buyurtma mavjud. Buyurtma bepul bajariladi. AI ishlayapti...")
-        update_user_free_used(user_id, 1)
-        order_id = create_order(user_id, work_type, topic, pages, 0, "processing")
-        ok = generate_order_file(order_id)
-        if ok:
-            bot.send_message(chat_id, "Bepul buyurtmangiz yakunlandi ✅", reply_markup=main_menu())
-        else:
-            bot.send_message(chat_id, "Buyurtmani bajarishda xato yuz berdi.", reply_markup=main_menu())
-        user_state[chat_id] = None
-        user_data[chat_id] = {}
-        return
-    elif bonus_orders > 0:
-        # referal bonus hisobidan
-        bot.send_message(chat_id, "Sizda referal bonus buyurtma mavjud. Buyurtma bepul bajariladi. AI ishlayapti...")
-        update_user_bonus_orders(user_id, -1)
-        order_id = create_order(user_id, work_type, topic, pages, 0, "processing")
-        ok = generate_order_file(order_id)
-        if ok:
-            bot.send_message(chat_id, "Bonus asosida bepul buyurtmangiz yakunlandi ✅", reply_markup=main_menu())
-        else:
-            bot.send_message(chat_id, "Buyurtmani bajarishda xato yuz berdi.", reply_markup=main_menu())
-        user_state[chat_id] = None
-        user_data[chat_id] = {}
-        return
-    else:
-        # pullik rejim
-        price = PRICE_PER_ORDER
-        order_id = create_order(user_id, work_type, topic, pages, price, "pending_payment")
-        data["order_id"] = order_id
-        user_data[chat_id] = data
-        user_state[chat_id] = "waiting_payment_screenshot"
-
-        text = (
-            "💳 *Pullik buyurtma*\n\n"
-            f"- Turi: {work_type}\n"
-            f"- Mavzu: {topic}\n"
-            f"- Bet/slayd soni: {pages}\n"
-            f"- Narx: {price} so'm\n\n"
-            "Iltimos, quyidagi kartaga to'lovni amalga oshiring:\n"
-            f"Karta raqami: `{CARD_NUMBER}`\n"
-            f"Karta egasi: *{CARD_OWNER}*\n\n"
-            "To'lov tugagach, shu chatga chek skrinshotini rasm ko'rinishida yuboring."
-        )
-        bot.send_message(chat_id, text, parse_mode="Markdown")
-
-
-# ============================
-#       CHEK / PHOTO
-# ============================
 
 @bot.message_handler(content_types=["photo"])
-def handle_payment_photo(message):
-    chat_id = message.chat.id
-    state = user_state.get(chat_id)
+def handle_cheque(message: types.Message):
+    """Har qanday fotoni chek deb qabul qilamiz va admin-ga forward qilamiz."""
+    user = get_user(message.from_user)
+    caption = (
+        f"🧾 Yangi chek!\n"
+        f"👤 Foydalanuvchi: {message.from_user.first_name} (@{message.from_user.username})\n"
+        f"🆔 ID: {message.from_user.id}\n"
+        f"Balans: {user['balance']} so'm\n\n"
+        "Quyidagi tugmalardan birini bosib tasdiqlang:"
+    )
 
-    if state != "waiting_payment_screenshot":
-        bot.send_message(chat_id, "Bu rasm to'lov cheki sifatida qabul qilinmadi. Avval buyurtma yarating.")
-        return
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("✅ +5 000", callback_data=f"approve_{message.from_user.id}_5000"),
+        types.InlineKeyboardButton("✅ +10 000", callback_data=f"approve_{message.from_user.id}_10000"),
+    )
+    kb.add(types.InlineKeyboardButton("❌ Rad etish", callback_data=f"approve_{message.from_user.id}_0"))
 
-    data = user_data.get(chat_id, {})
-    order_id = data.get("order_id")
-    if not order_id:
-        bot.send_message(chat_id, "Buyurtma ma'lumotlari topilmadi. Qayta urinib ko'ring.")
-        user_state[chat_id] = None
-        return
-
-    order = get_order(order_id)
-    if not order:
-        bot.send_message(chat_id, "Buyurtma topilmadi. Qayta urinib ko'ring.")
-        user_state[chat_id] = None
-        return
-
-    o_id, user_id, work_type, topic, pages, price, status, file_path = order
-
-    file_id = message.photo[-1].file_id
-    payment_id = create_payment(order_id, user_id, price, file_id)
-
-    bot.send_message(chat_id, "Chek qabul qilindi. Admin tasdiqlaganidan so'ng faylingiz tayyorlanadi.")
-
-    # admin'ga yuborish
-    if ADMIN_TELEGRAM_ID:
-        caption = (
-            "💵 Yangi to'lov cheki\n\n"
-            f"Payment ID: {payment_id}\n"
-            f"Order ID: {order_id}\n"
-            f"User ID: {user_id}\n"
-            f"Username: @{message.from_user.username or 'no_username'}\n"
-            f"Ish turi: {work_type}\n"
-            f"Mavzu: {topic}\n"
-            f"Bet/slayd: {pages}\n"
-            f"Summa: {price} so'm\n\n"
-            "Tasdiqlash yoki rad etish uchun tugmalardan foydalaning."
-        )
-        kb = types.InlineKeyboardMarkup()
-        kb.add(
-            types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"pay_ok_{payment_id}"),
-            types.InlineKeyboardButton("❌ Rad etish", callback_data=f"pay_no_{payment_id}")
-        )
-        try:
-            bot.send_photo(ADMIN_TELEGRAM_ID, file_id, caption=caption, reply_markup=kb)
-        except Exception as e:
-            print("Admin'ga chek yuborishda xato:", e)
-    user_state[chat_id] = None
-    user_data[chat_id] = {}
+    try:
+        bot.forward_message(ADMIN_TELEGRAM_ID, message.chat.id, message.message_id)
+        bot.send_message(ADMIN_TELEGRAM_ID, caption, reply_markup=kb)
+        bot.reply_to(message, "✅ Chek qabul qilindi. Admin tekshiradi, iltimos kuting.")
+    except Exception as e:
+        print("Chek forward xatosi:", e)
+        bot.reply_to(message, "❌ Chekni adminga yuborishda xatolik yuz berdi.")
 
 
-# ============================
-#      ADMIN CALLBACK
-# ============================
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pay_ok_") or c.data.startswith("pay_no_"))
-def handle_payment_callback(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("approve_"))
+def callback_approve(call: types.CallbackQuery):
     if call.from_user.id != ADMIN_TELEGRAM_ID:
-        bot.answer_callback_query(call.id, "Siz admin emassiz.")
+        bot.answer_callback_query(call.id, "Faqat admin tasdiqlay oladi.")
         return
 
-    data = call.data
-    is_ok = data.startswith("pay_ok_")
-    payment_id = int(data.split("_")[-1])
+    _, user_id_str, amount_str = call.data.split("_")
+    user_id = int(user_id_str)
+    amount = int(amount_str)
 
-    payment = get_payment(payment_id)
-    if not payment:
-        bot.answer_callback_query(call.id, "To'lov topilmadi.")
-        return
-
-    p_id, order_id, user_id, amount, status, screenshot_file_id = payment
-    order = get_order(order_id)
-    if not order:
-        bot.answer_callback_query(call.id, "Buyurtma topilmadi.")
-        return
-
-    o_id, u_id, work_type, topic, pages, price, o_status, file_path = order
-
-    user = get_user_by_id(user_id)
-    if not user:
-        bot.answer_callback_query(call.id, "Foydalanuvchi topilmadi.")
-        return
-
-    _, tg_id, username, full_name, free_used, bonus_orders, ref_code, invited_by = user
-    chat_id = tg_id
-
-    if is_ok:
-        update_payment_status(payment_id, "approved")
-        update_order_status(order_id, "processing")
-        bot.answer_callback_query(call.id, "To'lov tasdiqlandi. Fayl yaratilmoqda.")
-        bot.send_message(chat_id, "To'lov tasdiqlandi. Faylingiz tayyorlanmoqda...")
-
-        ok = generate_order_file(order_id)
-        if ok:
-            bot.send_message(chat_id, "Buyurtmangiz bajarildi ✅", reply_markup=main_menu())
-            # referal bonus
-            if invited_by and REF_BONUS_PER_PAID > 0:
-                update_user_bonus_orders(invited_by, REF_BONUS_PER_PAID)
-                inv_user = get_user_by_id(invited_by)
-                if inv_user:
-                    inv_tg_id = inv_user[1]
-                    try:
-                        bot.send_message(
-                            inv_tg_id,
-                            f"🎁 Sizning referalingiz buyurtma qildi va to'lov tasdiqlandi.\n"
-                            f"Sizga {REF_BONUS_PER_PAID} ta bonus buyurtma qo'shildi."
-                        )
-                    except Exception:
-                        pass
-        else:
-            bot.send_message(chat_id, "Fayl yaratishda xato yuz berdi.", reply_markup=main_menu())
+    if amount > 0:
+        update_user_balance(user_id, amount)
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO payments(user_id, amount, status, created_at) VALUES(?,?,?,?)",
+            (user_id, amount, "approved", datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        bot.answer_callback_query(call.id, f"{amount} so'm tasdiqlandi.")
+        bot.send_message(user_id, f"✅ To'lovingiz tasdiqlandi. Balansingiz +{amount} so'm.")
     else:
-        update_payment_status(payment_id, "rejected")
-        update_order_status(order_id, "payment_rejected")
-        bot.answer_callback_query(call.id, "To'lov rad etildi.")
+        bot.answer_callback_query(call.id, "Chek rad etildi.")
+        bot.send_message(user_id, "❌ Kechirasiz, chek rad etildi. Admin bilan bog'laning.")
+
+    # Tugmalarni o'chirib qo'yamiz
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+
+
+# ============================
+#         XIZMAT FUNKSIYA
+# ============================
+
+def can_use_service(user_id: int, chat_id: int) -> bool:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT balance, free_used FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if row["free_used"] < FIRST_FREE:
+        # bir marta bepul
+        mark_free_used(user_id)
         bot.send_message(
             chat_id,
-            "Admin to'lovni tasdiqlamadi. Iltimos, chekingizni tekshirib, kerak bo'lsa qayta yuboring.",
-            reply_markup=main_menu()
+            f"🎁 Sizga *bir dona bepul* topshiriq berildi. Keyingi topshiriqlar narxi: {TASK_PRICE} so'm.",
+            parse_mode="Markdown",
         )
+        return True
+
+    if row["balance"] < TASK_PRICE:
+        bot.send_message(
+            chat_id,
+            f"❗ Balansingiz yetarli emas.\n"
+            f"Joriy balans: *{row['balance']} so'm*\n"
+            f"Bir topshiriq narxi: *{TASK_PRICE} so'm*\n\n"
+            f"/pay buyrug'i yoki \"💳 To'lov / Hisob\" tugmasi orqali balansni to'ldiring.",
+            parse_mode="Markdown",
+        )
+        return False
+
+    update_user_balance(user_id, -TASK_PRICE)
+    bot.send_message(
+        chat_id,
+        f"✅ Xizmat uchun *{TASK_PRICE} so'm* yechildi. Rahmat!\n"
+        f"Yangi balansni /balance orqali ko'rishingiz mumkin.",
+        parse_mode="Markdown",
+    )
+    return True
 
 
-# ============================
-#        AI CHAT (/ai)
-# ============================
+def ask_topic_and_pages(chat_id: int, kind_code: str, nice_name: str):
+    msg = bot.send_message(
+        chat_id,
+        f"{nice_name} uchun mavzuni va taxminiy betlar sonini yuboring.\n\n"
+        "Masalan: `O'z-o'zini anglash psixologiyasi, 8`",
+    )
+    bot.register_next_step_handler(msg, handle_topic_pages_step, kind_code, nice_name)
 
-@bot.message_handler(func=lambda m: user_state.get(m.chat.id) == "ai_chat")
-def handle_ai_chat(message):
-    chat_id = message.chat.id
-    text = message.text.strip()
-    bot.send_chat_action(chat_id, "typing")
-    answer = ask_ai(text)
-    if answer.startswith("ERROR:"):
-        bot.send_message(chat_id, answer[6:], reply_markup=main_menu())
+
+def parse_topic_pages(text: str):
+    if "," in text:
+        topic, pages_str = text.split(",", 1)
+        topic = topic.strip()
+        try:
+            pages = int(pages_str.strip())
+        except ValueError:
+            pages = 8
     else:
-        bot.send_message(chat_id, answer, reply_markup=main_menu())
-    user_state[chat_id] = None
+        topic = text.strip()
+        pages = 8
+    if pages < 3:
+        pages = 3
+    if pages > 30:
+        pages = 30
+    return topic, pages
 
 
-# ============================
-#      DEFAULT HANDLER
-# ============================
+def handle_topic_pages_step(message: types.Message, kind_code: str, nice_name: str):
+    user = get_user(message.from_user)
+    if not can_use_service(user["user_id"], message.chat.id):
+        return
 
-@bot.message_handler(func=lambda m: True, content_types=["text"])
-def fallback(message):
-    if message.text.startswith("/"):
-        bot.send_message(message.chat.id, "Noma'lum buyruq. /start yoki /help ni yozib ko'ring.")
-    else:
+    topic, pages = parse_topic_pages(message.text)
+    bot.send_message(message.chat.id, f"⌛ AI {nice_name} tayyorlamoqda. Kuting...")
+
+    kind_text = {
+        "slayd": "slayd taqdimot (PPTX)",
+        "referat": "mustaqil ish / referat",
+        "kurs": "kurs ishi",
+        "insho": "insho",
+        "tezis": "tezislar to'plami",
+        "maqola": "ilmiy maqola",
+    }.get(kind_code, "yozma ish")
+
+    prompt = build_prompt(kind_text, topic, pages)
+    ai_text = ask_ai(prompt)
+
+    if ai_text.startswith("ERROR"):
+        bot.send_message(message.chat.id, ai_text)
+        return
+
+    # Fayl yaratamiz
+    try:
+        if kind_code == "slayd":
+            filename = f"slayd_{message.from_user.id}_{int(datetime.utcnow().timestamp())}.pptx"
+            create_pptx(topic, ai_text, filename)
+            with open(filename, "rb") as f:
+                bot.send_document(
+                    message.chat.id,
+                    f,
+                    visible_file_name=f"{topic[:30]} - slayd.pptx",
+                    caption="✅ AI yordamida tayyorlangan slayd.",
+                )
+        else:
+            filename = f"ish_{kind_code}_{message.from_user.id}_{int(datetime.utcnow().timestamp())}.docx"
+            create_docx(topic, ai_text, filename)
+            with open(filename, "rb") as f:
+                bot.send_document(
+                    message.chat.id,
+                    f,
+                    visible_file_name=f"{topic[:30]} - {kind_code}.docx",
+                    caption=f"✅ AI yordamida tayyorlangan {kind_text}.",
+                )
+    except Exception as e:
+        print("Fayl yaratish xatosi:", e)
+        # Agar faylda muammo bo'lsa, matnni jo'natib yuboramiz
         bot.send_message(
             message.chat.id,
-            "Menyudan kerakli bo'limni tanlang.",
-            reply_markup=main_menu()
+            "⚠️ Fayl yaratishda xatolik yuz berdi. Matnni shu yerga yuboryapman:\n\n" + ai_text,
         )
 
 
 # ============================
-#      BOTNI ISHGA TUSHIRISH
+#        MATNLI MENYU
 # ============================
 
+@bot.message_handler(func=lambda m: m.text in [
+    "📝 Slayd",
+    "📄 Mustaqil ish / Referat",
+    "📚 Kurs ishi",
+    "✍️ Insho",
+    "🧩 Tezislar",
+    "📰 Maqola",
+    "🤖 AI bilan suhbat",
+    "🎁 Referal bonus",
+    "💰 Balans",
+    "💳 To'lov / Hisob",
+    "👨‍🏫 Profi jamoa",
+    "❓ Yordam",
+])
+def menu_router(message: types.Message):
+    text = message.text
+
+    if text == "📝 Slayd":
+        ask_topic_and_pages(message.chat.id, "slayd", "📝 Slayd (PPTX)")
+    elif text == "📄 Mustaqil ish / Referat":
+        ask_topic_and_pages(message.chat.id, "referat", "📄 Mustaqil ish / Referat")
+    elif text == "📚 Kurs ishi":
+        ask_topic_and_pages(message.chat.id, "kurs", "📚 Kurs ishi")
+    elif text == "✍️ Insho":
+        ask_topic_and_pages(message.chat.id, "insho", "✍️ Insho")
+    elif text == "🧩 Tezislar":
+        ask_topic_and_pages(message.chat.id, "tezis", "🧩 Tezislar")
+    elif text == "📰 Maqola":
+        ask_topic_and_pages(message.chat.id, "maqola", "📰 Maqola")
+    elif text == "🤖 AI bilan suhbat":
+        msg = bot.send_message(
+            message.chat.id,
+            "Savolingiz yoki mavzuni yozing. AI imkon qadar aniq va tushunarli javob beradi.",
+        )
+        bot.register_next_step_handler(msg, handle_chat_ai)
+    elif text == "🎁 Referal bonus":
+        user = get_user(message.from_user)
+        ref_link = f"https://t.me/{bot.get_me().username}?start=ref_{message.from_user.id}"
+        txt = (
+            "🎁 *Referal dasturi*\n\n"
+            "Do'stlaringizni taklif qiling va har bir aktiv foydalanuvchi uchun bonus oling!\n"
+            f"Bonus: har bir do'stingiz uchun *{REF_BONUS} so'm*.\n\n"
+            f"Referal havolasi:\n`{ref_link}`\n\n"
+            f"Jami referallar: *{user['referrals']} ta*."
+        )
+        bot.send_message(message.chat.id, txt, parse_mode="Markdown")
+    elif text == "💰 Balans":
+        cmd_balance(message)
+    elif text == "💳 To'lov / Hisob":
+        cmd_pay(message)
+    elif text == "👨‍🏫 Profi jamoa":
+        bot.send_message(
+            message.chat.id,
+            "👨‍🏫 *Profi jamoa va katta hajmdagi ishlar*:\n\n"
+            f"Kurs ishi, bitiruv malakaviy ishi yoki boshqa katta topshiriqlar uchun bevosita admin bilan bog'laning: {ADMIN_USERNAME}\n\n"
+            "Shartlar va narxlar alohida kelishiladi.",
+            parse_mode="Markdown",
+        )
+    elif text == "❓ Yordam":
+        bot.send_message(
+            message.chat.id,
+            "❓ *Yordam bo'limi*\n\n"
+            "1. /start – botni boshlash va menyuni ko'rish\n"
+            "2. /balance – balansni ko'rish\n"
+            "3. /pay – to'lov bo'limi\n\n"
+            "Har qanday savol bo'lsa, bevosita admin bilan bog'lanishingiz mumkin: "
+            f"{ADMIN_USERNAME}",
+            parse_mode="Markdown",
+        )
+
+
+def handle_chat_ai(message: types.Message):
+    user = get_user(message.from_user)
+    if not can_use_service(user["user_id"], message.chat.id):
+        return
+
+    bot.send_message(message.chat.id, "🤖 AI javob tayyorlamoqda, kuting...")
+    prompt = (
+        "Talaba savoliga tushunarli, qisqa va aniq javob ber.\n\n"
+        f"SAVOL/MAVZU:\n{message.text}"
+    )
+    answer = ask_ai(prompt)
+    bot.send_message(message.chat.id, answer)
+
+
+# ============================
+#            RUN
+# ============================
+
+print("🚀 SUPER TALABA PRO bot ishga tushmoqda...")
+
 if __name__ == "__main__":
-    print("🚀 SUPER TALABA PRO BOT ishga tushmoqda...")
-    init_db()
-    ensure_files_dir()
-    bot.infinity_polling(skip_pending=True)
+    # long_polling parametrlarini biroz kichik qilish Railway uchun qulay
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
