@@ -31,7 +31,7 @@ from docx import Document
 #      ENV SOZLAMALAR
 # ============================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("8242328546:AAHyZTwZWKHqb0lqueYhRJ0BLQxV8GWAuSs", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 if not BOT_TOKEN:
@@ -361,3 +361,4 @@ def fallback(message):
 if __name__ == "__main__":
     print("✅ Super Talaba (Gemini, soddalashtirilgan) ishga tushdi.")
     bot.infinity_polling(skip_pending=True)
+
